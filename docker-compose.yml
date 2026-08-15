@@ -1,0 +1,75 @@
+# The whole stack: `make docker-up` builds the image, waits for Postgres, runs
+# the migrations, then starts the API. TensorFlow Serving is behind a profile
+# because it needs a 600 MB model download that most work does not.
+
+name: object-counter
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${DB_USER:-counter}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-counter}
+      POSTGRES_DB: ${DB_NAME:-object_counter}
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      # Nothing downstream should start before the database answers queries.
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-counter} -d ${DB_NAME:-object_counter}"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      COUNTER_DATABASE_URL: postgresql+psycopg://${DB_USER:-counter}:${DB_PASSWORD:-counter}@postgres:5432/${DB_NAME:-object_counter}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build: .
+    ports:
+      - "${API_PORT:-5000}:5000"
+    environment:
+      COUNTER_ENV: prod
+      COUNTER_DATABASE_URL: postgresql+psycopg://${DB_USER:-counter}:${DB_PASSWORD:-counter}@postgres:5432/${DB_NAME:-object_counter}
+      COUNTER_TFS_BASE_URL: http://tfserving:8501
+      # The dev catalog serves the fake detector, so the stack is useful before
+      # any model is downloaded. Point at models.yaml once TF Serving is up.
+      COUNTER_MODEL_CATALOG: ${COUNTER_MODEL_CATALOG:-/app/config/models.dev.yaml}
+      COUNTER_LOG_FORMAT: json
+    volumes:
+      # Model cache for privately trained artifacts; see docs/MULTI_MODEL.md.
+      - model_cache:/app/var/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  tfserving:
+    profiles: ["tfserving"]
+    image: intel/intel-optimized-tensorflow-serving:2.8.0
+    ports:
+      - "8500:8500"
+      - "8501:8501"
+    environment:
+      TENSORFLOW_INTER_OP_PARALLELISM: 2
+      TENSORFLOW_INTRA_OP_PARALLELISM: ${TFS_THREADS:-4}
+      OMP_NUM_THREADS: ${TFS_THREADS:-4}
+    volumes:
+      # Weights are downloaded by `make models-download` into an ignored
+      # directory; the serving config is version controlled.
+      - ./tmp/model:/models
+      - ./config/tfserving/model_config.config:/models/model_config.config:ro
+    command: ["--model_config_file=/models/model_config.config"]
+
+volumes:
+  postgres_data:
+  model_cache:

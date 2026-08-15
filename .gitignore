@@ -1,4 +1,17 @@
-.idea
-.venv
-spikes
-*.pyc
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.env
+
+# Downloaded model weights and fetched artifacts: never in git.
+tmp/
+var/
+*.onnx
+*.pt
+*.pb

@@ -1,117 +1,128 @@
-# NIQ Innovation Enablement - Challenge 1 (Object Counting)
+# Object counter
 
-The goal of this repo is demonstrate how to apply Hexagonal Architecture in a ML based system.
+Send it an image and a confidence threshold. It detects the objects, counts the
+ones scoring above the threshold, and groups them by class.
 
-This application consists in a Flask API that receives an image and a threshold and returns the number of objects detected in the image.
+## Run it
 
-The application is composed by 3 layers:
-
-- **entrypoints**: This layer is responsible for exposing the API and receiving the requests. It is also responsible for validating the requests and returning the responses.
-
-- **adapters**: This layer is responsible for the communication with the external services. It is responsible for translating the domain objects to the external services objects and vice-versa.
-
-- **domain**: This layer is responsible for the business logic. It is responsible for orchestrating the calls to the external services and for applying the business rules.
-
-The model used in this example has been taken from 
-[IntelAI](https://github.com/IntelAI/models/blob/master/docs/object_detection/tensorflow_serving/Tutorial.md)
-
-
-## Instructions to configure this project
-```
-# Download the rfcn model 
-wget https://storage.googleapis.com/intel-optimized-tensorflow/models/v1_8/rfcn_resnet101_fp32_coco_pretrained_model.tar.gz
-tar -xzvf rfcn_resnet101_fp32_coco_pretrained_model.tar.gz -C tmp
-rm rfcn_resnet101_fp32_coco_pretrained_model.tar.gz
-chmod -R 777 tmp/rfcn_resnet101_coco_2018_01_28
-mkdir -p tmp/model/rfcn/1
-mv tmp/rfcn_resnet101_coco_2018_01_28/saved_model/saved_model.pb tmp/model/rfcn/1
-rm -rf tmp/rfcn_resnet101_coco_2018_01_28
-```
-
-## Setup and run Tensorflow Serving
-
-```
-
-# For unix systems
-cores_per_socket=`lscpu | grep "Core(s) per socket" | cut -d':' -f2 | xargs`
-num_sockets=`lscpu | grep "Socket(s)" | cut -d':' -f2 | xargs`
-num_physical_cores=$((cores_per_socket * num_sockets))
-
-docker rm -f tfserving
-docker run \
-    --name=tfserving \
-    -p 8500:8500 \
-    -p 8501:8501 \
-    -v "$(pwd)\tmp\model:/models" \
-    -e OMP_NUM_THREADS=$num_physical_cores \
-    -e TENSORFLOW_INTER_OP_PARALLELISM=2 \
-    -e TENSORFLOW_INTRA_OP_PARALLELISM=$num_physical_cores \
-    intel/intel-optimized-tensorflow-serving:2.8.0 \
-    --model_config_file=/models/model_config.config
-
-# For Windows (Powershell)
-$num_physical_cores=(Get-WmiObject Win32_Processor | Select-Object NumberOfCores).NumberOfCores
-echo $num_physical_cores
-
-docker rm -f tfserving
-docker run `
-    --name=tfserving `
-    -p 8500:8500 `
-    -p 8501:8501 `
-    -v "$pwd\tmp\model:/models" `
-    -e OMP_NUM_THREADS=$num_physical_cores `
-    -e TENSORFLOW_INTER_OP_PARALLELISM=2 `
-    -e TENSORFLOW_INTRA_OP_PARALLELISM=$num_physical_cores `
-    intel/intel-optimized-tensorflow-serving:2.8.0 `
-    --model_config_file=/models/model_config.config
-```
-
-
-## Run mongo 
+You need Python 3.11+ and Make. Docker only if you want the database.
 
 ```bash
-docker rm -f test-mongo
-docker run --name test-mongo --rm -p 27017:27017 -d mongo:latest
+make run
 ```
 
-
-## Setup virtualenv
+That serves on port 5000 with a fake detector and in-memory counts. Nothing to
+download first.
 
 ```bash
-# Python >= 3.0
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+curl -F "threshold=0.9" -F "file=@resources/images/cat.jpg" localhost:5000/object-count
+curl -F "threshold=0.9" -F "file=@resources/images/cat.jpg" localhost:5000/object-detect
 ```
 
-## Run the application
+With Postgres behind it, so the counts survive a restart:
 
-### Using fakes
-```
-python -m counter.entrypoints.webapp
-```
-
-### Using real services in docker containers
-
-```
-# Unix
-ENV=prod python -m counter.entrypoints.webapp
-
-# Powershell
-$env:ENV = "prod"
-python -m counter.entrypoints.webapp
+```bash
+make setup      # venv, database, migrations
+make run-prod
 ```
 
-## Call the service
+Or `make docker-up` for the whole stack in containers.
 
-```shell script
- curl -F "threshold=0.9" -F "file=@resources/images/boy.jpg" http://0.0.0.0:5000/object-count
- curl -F "threshold=0.9" -F "file=@resources/images/cat.jpg" http://0.0.0.0:5000/object-count
- curl -F "threshold=0.9" -F "file=@resources/images/food.jpg" http://0.0.0.0:5000/object-count 
+`make help` lists the rest.
+
+## Endpoints
+
+| Path | What you get |
+| --- | --- |
+| `POST /object-detect` | The predictions |
+| `POST /object-count` | Counts by class for this image, plus the running totals |
+| `GET /models` | Which models this instance can serve |
+| `GET /healthz` `GET /readyz` | Liveness and readiness |
+| `GET /docs` | OpenAPI UI |
+
+Both POSTs take the same form: `file`, and optionally `threshold` (0 to 1) and
+`model_name`. Boxes come back normalised to 0..1 with the origin top-left, so
+scale them to whatever you are drawing on.
+
+Errors all look the same, and the id is in the `X-Request-ID` header too:
+
+```json
+{"error": {"type": "invalid_threshold", "message": "threshold must be between 0.0 and 1.0, got 90.0", "request_id": "9f2c…"}}
 ```
 
-## Run the tests
+404 for an unknown model, 413 too big, 415 not an image, 422 a bad threshold,
+503 when the detector or the database is down.
+
+There is a CLI over the same code: `make cli IMAGE=resources/images/food.jpg`.
+
+## Configuration
+
+`.env.example` lists every setting. The ones you will actually touch:
+
+| Variable | Default | |
+| --- | --- | --- |
+| `COUNTER_ENV` | `dev` | `dev` is fakes and memory, `prod` is real models and Postgres |
+| `COUNTER_DATABASE_URL` | local Postgres | Any SQLAlchemy URL |
+| `COUNTER_MODEL_CATALOG` | packaged | Your own catalog of models |
+| `COUNTER_TFS_BASE_URL` | `localhost:8501` | TensorFlow Serving |
+| `COUNTER_DEFAULT_THRESHOLD` | `0.5` | Used when the request omits one |
+
+A bad value stops the process at startup and names the field.
+
+## Tests
+
+```bash
+make test          # all 165
+make test-unit     # no I/O
+make coverage
+make lint typecheck
+```
+
+91% coverage. The database tests run on Postgres when `TEST_DATABASE_URL` points
+at one and on SQLite when it does not. So the suite works on a laptop with
+nothing installed, and CI still runs it against the dialect that ships.
+
+## Layout
 
 ```
-pytest
+counter/
+  domain/       models, ports, counting logic. No I/O, no frameworks
+  adapters/
+    detector/   TF Serving, ONNX Runtime, TorchScript, fake
+    repo/       in-memory and SQL
+  entrypoints/  FastAPI app and CLI
+  config.py     typed settings
+  bootstrap.py  the only file that picks which adapter is used
+migrations/     Alembic
+tests/          unit, integration, e2e
 ```
+
+Nothing in `domain/` imports from `adapters/` or `entrypoints/`.
+
+## Serving your own models
+
+A model is a YAML catalog entry, not code. Point `COUNTER_MODEL_CATALOG` at your
+file, put the weights in your model store, and the name works on every endpoint.
+Artifacts can be pinned to a SHA-256, so you know what you are actually serving.
+`config/models.example.yaml` has four models across three frameworks.
+
+## Docs
+
+- [Code review](docs/CODE_REVIEW.md) of the original code: 19 findings, all fixed
+- [Architecture](docs/ARCHITECTURE.md), and the options that were rejected
+- [Internal models](docs/MULTI_MODEL.md) and [frameworks](docs/MULTI_FRAMEWORK.md)
+- [Testing](docs/TESTING.md)
+- [Decision records](docs/adr)
+
+## The exercise
+
+| # | Task | Where |
+| --- | --- | --- |
+| 1 | Endpoint returning predictions | `POST /object-detect` |
+| 2 | Relational `ObjectCountRepo` | `counter/adapters/repo/sql.py`, `migrations/` |
+| 3, 4 | Review and fixes | [CODE_REVIEW.md](docs/CODE_REVIEW.md) |
+| 5 | Internally trained models | [MULTI_MODEL.md](docs/MULTI_MODEL.md) |
+| 6a | Integration and e2e tests | [TESTING.md](docs/TESTING.md) |
+| 6b | Several frameworks | [MULTI_FRAMEWORK.md](docs/MULTI_FRAMEWORK.md) |
+
+Both halves of task 6 are done.

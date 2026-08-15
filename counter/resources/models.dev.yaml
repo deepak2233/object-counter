@@ -1,0 +1,14 @@
+# Dev/test catalog: runs with no model server, no weights and no GPU.
+# `make run` uses this; `make run-prod` uses models.yaml.
+
+default_model: fake
+
+models:
+  - name: fake
+    framework: fake
+    version: "1"
+
+  - name: rfcn
+    framework: tensorflow-serving
+    version: "1"
+    labels: mscoco_label_map.json

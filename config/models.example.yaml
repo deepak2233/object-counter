@@ -1,0 +1,54 @@
+# Example catalog for a deployment that serves several internally trained
+# models across several frameworks. Point COUNTER_MODEL_CATALOG at a copy of
+# this file. See docs/MULTI_MODEL.md for the workflow around it.
+
+default_model: retail-shelf-v3
+
+models:
+  # An internally trained ONNX export, pulled from a private bucket and pinned
+  # by digest. The service refuses to serve it if the bytes do not match.
+  - name: retail-shelf-v3
+    framework: onnx
+    version: "3.2.1"
+    labels: /app/config/labels/retail_shelf_v3.txt
+    input_size: 640
+    score_floor: 0.05
+    iou_threshold: 0.45
+    artifact:
+      uri: s3://${MODEL_BUCKET}/detection/retail-shelf/3.2.1/model.onnx
+      sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+
+  # The same weights at the previous version, kept servable so a bad release is
+  # a routing change rather than a redeploy.
+  - name: retail-shelf-v2
+    framework: onnx
+    version: "2.8.0"
+    labels: /app/config/labels/retail_shelf_v2.txt
+    artifact:
+      uri: s3://${MODEL_BUCKET}/detection/retail-shelf/2.8.0/model.onnx
+      sha256: "1111111111111111111111111111111111111111111111111111111111111111"
+
+  # A TorchScript model that was never exported to ONNX, served in-process on
+  # whatever device the pod has.
+  - name: promo-detector
+    framework: torchscript
+    version: "1.4.0"
+    labels: /app/config/labels/promo.txt
+    device: cpu
+    artifact:
+      uri: s3://${MODEL_BUCKET}/detection/promo/1.4.0/model.pt
+      sha256: "2222222222222222222222222222222222222222222222222222222222222222"
+
+  # A model served by a TensorFlow Serving deployment rather than in-process.
+  # `remote_name` covers the case where TFS knows it under a different name.
+  - name: rfcn
+    framework: tensorflow-serving
+    version: "1"
+    labels: mscoco_label_map.json
+    endpoint: ${TFS_BASE_URL}
+    remote_name: rfcn
+
+  # Always keep one dependency-free entry: it makes smoke tests and readiness
+  # checks possible on an environment with no weights at all.
+  - name: fake
+    framework: fake
