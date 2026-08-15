@@ -1,0 +1,105 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "object-counter"
+version = "1.0.0"
+description = "Object detection and counting service built on hexagonal architecture"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+
+dependencies = [
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "pillow>=10.2",
+    "SQLAlchemy>=2.0.25",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "PyYAML>=6.0",
+]
+
+[project.optional-dependencies]
+# Inference backends are optional so that a deployment only installs the runtime
+# it actually serves. See docs/MULTI_FRAMEWORK.md.
+onnx = ["onnxruntime>=1.17"]
+torch = ["torch>=2.2"]
+# Artifact stores for privately trained models. See docs/MULTI_MODEL.md.
+s3 = ["boto3>=1.34"]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=4.1",
+    "ruff>=0.4",
+    "mypy>=1.9",
+    "types-PyYAML>=6.0",
+]
+
+[project.scripts]
+object-counter = "counter.entrypoints.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["counter*"]
+
+[tool.setuptools.package-data]
+counter = ["resources/*.json", "resources/*.txt", "resources/*.yaml"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Markdown is documentation, and the code blocks in docs/ quote the original
+# service verbatim. Reformatting them would silently rewrite the evidence.
+extend-exclude = ["*.md"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RET", "C4", "ARG", "PTH", "RUF"]
+ignore = [
+    "B008",   # FastAPI dependency defaults are calls by design
+    "RUF012", # mutable class attrs are fine on pydantic settings
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ARG001", "ARG002"]
+"migrations/*" = ["E501", "ARG001"]
+
+[tool.mypy]
+python_version = "3.11"
+packages = ["counter"]
+disallow_untyped_defs = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+plugins = []
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime.*", "torch.*", "boto3.*", "botocore.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+markers = [
+    "unit: fast, no I/O, no external services",
+    "integration: touches a real database or a stubbed transport",
+    "e2e: drives the HTTP application end to end",
+]
+filterwarnings = ["error::DeprecationWarning:counter.*"]
+
+[tool.coverage.run]
+source = ["counter"]
+branch = true
+omit = ["counter/entrypoints/cli.py"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

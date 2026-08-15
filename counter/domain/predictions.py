@@ -1,19 +1,55 @@
-from functools import reduce
-from typing import List
+"""Pure functions over predictions. No I/O, no state, trivially testable."""
 
-from counter.domain.models import Prediction, ObjectCount
+from __future__ import annotations
 
+from collections import Counter
+from collections.abc import Iterable
 
-def over_threshold(predictions: List[Prediction], threshold: float):
-    return filter(lambda prediction: prediction.score >= threshold, predictions)
+from counter.domain.errors import InvalidThresholdError
+from counter.domain.models import ObjectCount, Prediction
 
-
-def count(predictions: List[Prediction]) -> List[ObjectCount]:
-    object_classes = map(lambda prediction: prediction.class_name, predictions)
-    object_classes_counter = reduce(__count_object_classes, object_classes, {})
-    return [ObjectCount(object_class, occurrences) for object_class, occurrences in object_classes_counter.items()]
+MIN_THRESHOLD = 0.0
+MAX_THRESHOLD = 1.0
 
 
-def __count_object_classes(class_counter: dict, object_class: str):
-    class_counter[object_class] = class_counter.get(object_class, 0) + 1
-    return class_counter
+def validate_threshold(threshold: float) -> float:
+    """Return the threshold as a float, or raise if it is not a usable score.
+
+    Confidence scores from a detector are probabilities in [0, 1], so a
+    threshold outside that interval is a caller mistake, not an empty result:
+    0.9 and 90 mean very different things and only one of them is a threshold.
+    """
+    try:
+        value = float(threshold)
+    except (TypeError, ValueError) as exc:
+        raise InvalidThresholdError(f"threshold must be a number, got {threshold!r}") from exc
+
+    if not MIN_THRESHOLD <= value <= MAX_THRESHOLD:
+        raise InvalidThresholdError(
+            f"threshold must be between {MIN_THRESHOLD} and {MAX_THRESHOLD}, got {value}"
+        )
+    return value
+
+
+def over_threshold(predictions: Iterable[Prediction], threshold: float) -> list[Prediction]:
+    """Keep predictions whose score is at or above the threshold.
+
+    Returns a list, not a generator: the caller counts them, logs them and
+    serialises them, and a one-shot iterator makes that a bug waiting to happen.
+    """
+    return [prediction for prediction in predictions if prediction.score >= threshold]
+
+
+def count(predictions: Iterable[Prediction]) -> list[ObjectCount]:
+    """Group predictions by class name.
+
+    Ordered by class name so that responses, logs and test assertions are
+    reproducible; callers should not have to sort before comparing.
+    """
+    occurrences = Counter(prediction.class_name for prediction in predictions)
+    return [ObjectCount(object_class, n) for object_class, n in sorted(occurrences.items())]
+
+
+def total(counts: Iterable[ObjectCount]) -> int:
+    """Accumulated number of objects across classes."""
+    return sum(object_count.count for object_count in counts)
