@@ -15,6 +15,7 @@ from counter.domain.errors import (
     ModelLoadError,
     ModelNotFoundError,
     ObjectCounterError,
+    PayloadTooLargeError,
     RepositoryError,
 )
 from counter.observability.logging import request_id_var
@@ -30,10 +31,17 @@ HTTP_422_UNPROCESSABLE_CONTENT = 422
 STATUS_BY_ERROR: dict[type[ObjectCounterError], int] = {
     InvalidThresholdError: HTTP_422_UNPROCESSABLE_CONTENT,
     InvalidImageError: status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+    PayloadTooLargeError: HTTP_413_PAYLOAD_TOO_LARGE,
     ModelNotFoundError: status.HTTP_404_NOT_FOUND,
     ModelLoadError: status.HTTP_503_SERVICE_UNAVAILABLE,
     DetectorUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     RepositoryError: status.HTTP_503_SERVICE_UNAVAILABLE,
+}
+
+PUBLIC_MESSAGES: dict[type[ObjectCounterError], str] = {
+    ModelLoadError: "model is unavailable",
+    DetectorUnavailableError: "detector is unavailable",
+    RepositoryError: "repository is unavailable",
 }
 
 
@@ -59,7 +67,8 @@ def register_exception_handlers(app: FastAPI) -> None:
             "request rejected",
             extra={"error_type": type(exc).__name__, "status": status_code, "detail": str(exc)},
         )
-        return error_response(_snake_case(type(exc).__name__), str(exc), status_code)
+        message = PUBLIC_MESSAGES.get(type(exc), str(exc))
+        return error_response(_snake_case(type(exc).__name__), message, status_code)
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(_: Request, exc: RequestValidationError) -> JSONResponse:

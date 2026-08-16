@@ -10,33 +10,39 @@ from counter.domain.ports import ObjectCountRepo
 
 
 class InMemoryObjectCountRepo(ObjectCountRepo):
-    """Process-local counts.
-
-    Two deliberate differences from the original in-memory adapter:
-
-    * a lock. `store[key] = ObjectCount(key, stored.count + new.count)` is a
-      read-modify-write, and the app is served by a threadpool, so two requests
-      counting a cat each could leave the store at one.
-    * unknown classes come back as a zero count instead of `None`. The old
-      `read_values(['giraffe'])` returned `[None]` for a class never seen, and
-      every caller had to remember to filter it out.
-    """
-
     def __init__(self) -> None:
-        self._store: dict[str, int] = {}
+        self._store: dict[tuple[str, str, str], int] = {}
         self._lock = threading.Lock()
 
-    def read_values(self, object_classes: Sequence[str] | None = None) -> list[ObjectCount]:
+    def read_values(
+        self,
+        model_name: str,
+        model_version: str,
+        object_classes: Sequence[str] | None = None,
+    ) -> list[ObjectCount]:
         with self._lock:
             if object_classes is None:
-                items = sorted(self._store.items())
+                items = sorted(
+                    (key[2], count)
+                    for key, count in self._store.items()
+                    if key[:2] == (model_name, model_version)
+                )
             else:
-                items = [(name, self._store.get(name, 0)) for name in object_classes]
+                items = [
+                    (name, self._store.get((model_name, model_version, name), 0))
+                    for name in object_classes
+                ]
         return [ObjectCount(object_class=name, count=count) for name, count in items]
 
-    def update_values(self, new_values: Sequence[ObjectCount]) -> None:
+    def update_values(
+        self,
+        model_name: str,
+        model_version: str,
+        new_values: Sequence[ObjectCount],
+    ) -> None:
         with self._lock:
             for value in new_values:
-                self._store[value.object_class] = (
-                    self._store.get(value.object_class, 0) + value.count
-                )
+                if value.count == 0:
+                    continue
+                key = (model_name, model_version, value.object_class)
+                self._store[key] = self._store.get(key, 0) + value.count

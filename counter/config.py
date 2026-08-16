@@ -1,12 +1,4 @@
-"""Typed configuration.
-
-Every knob is declared, typed and validated once, here. The original service
-read `os.environ` inline and dispatched on it with
-`globals()[f"{env}_count_action"]()`, which turns an environment variable into
-an arbitrary attribute lookup: a typo (`ENV=prd`) raises `KeyError: 'prd_count_action'`
-from the bottom of a stack trace, and anything importable becomes reachable from
-the environment.
-"""
+"""Typed runtime configuration."""
 
 from __future__ import annotations
 
@@ -70,11 +62,7 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _apply_profile_defaults(self) -> Settings:
-        """Fill in whatever the operator did not set, based on the profile.
-
-        `dev` runs with fakes and no infrastructure; `prod` persists to the
-        relational store. Explicit settings always win — this only fills gaps.
-        """
+        """Apply profile defaults and production invariants."""
         explicit = self.model_fields_set
 
         if "persistence" not in explicit and self.env == "prod":
@@ -82,6 +70,9 @@ class Settings(BaseSettings):
 
         if "model_catalog" not in explicit or self.model_catalog is None:
             self.model_catalog = packaged_catalog_path(PACKAGED_CATALOGS[self.env])
+
+        if self.env == "prod" and self.persistence != "sql":
+            raise ValueError("prod requires sql persistence")
 
         return self
 

@@ -20,13 +20,7 @@ logger = logging.getLogger(__name__)
 
 
 class CatalogModelRegistry(ObjectDetectorRegistry):
-    """Builds detectors from catalog entries, lazily, and caches them.
-
-    Lazy because a service with five models in the catalog should not load five
-    models to answer a request for one — and should not fail to start because
-    the one model nobody asked for is missing. Cached because loading an ONNX
-    session per request would dominate the latency budget.
-    """
+    """Build and cache detectors from catalog entries."""
 
     def __init__(
         self,
@@ -64,8 +58,7 @@ class CatalogModelRegistry(ObjectDetectorRegistry):
             )
 
         with self._lock:
-            # Re-check inside the lock: two requests for a cold model must build
-            # one session, not two.
+            # Another request may have populated the cache before the lock.
             cached = self._detectors.get(name)
             if cached is None:
                 cached = self._build(spec)
@@ -85,12 +78,19 @@ class CatalogModelRegistry(ObjectDetectorRegistry):
         ]
 
     def warm(self) -> None:
-        """Load every catalog model. Call it at startup to trade boot time for p99."""
+        """Load every catalog model."""
         for spec in self._catalog.models:
             try:
                 self.get(spec.name)
             except Exception:
                 logger.exception("could not warm model", extra={"model": spec.name})
+
+    def close(self) -> None:
+        with self._lock:
+            detectors = list(self._detectors.values())
+            self._detectors.clear()
+        for detector in detectors:
+            detector.close()
 
     def _build(self, spec: ModelSpec) -> ObjectDetector:
         logger.info("building detector", extra={"model": spec.name, "framework": spec.framework})
@@ -101,7 +101,8 @@ class CatalogModelRegistry(ObjectDetectorRegistry):
         if spec.framework == "tensorflow-serving":
             return TensorFlowServingDetector(
                 base_url=spec.endpoint or self._tfs_base_url,
-                model_name=spec.remote_name or spec.name,
+                model_name=spec.name,
+                remote_name=spec.remote_name,
                 labels=load_labels(spec.labels) if spec.labels else None,
                 version=spec.version,
                 timeout=self._tfs_timeout,
@@ -127,12 +128,15 @@ class CatalogModelRegistry(ObjectDetectorRegistry):
             name=spec.name,
             version=spec.version,
             input_size=spec.input_size,
+            input_contract=spec.input_contract,
+            score_floor=spec.score_floor,
+            iou_threshold=spec.iou_threshold,
             device=spec.device,
         )
 
 
 class StaticModelRegistry(ObjectDetectorRegistry):
-    """A registry over already-built detectors. Used by tests and by the dev profile."""
+    """Registry over already-built detectors."""
 
     def __init__(
         self, detectors: dict[str, ObjectDetector], default_model: str | None = None
@@ -157,3 +161,7 @@ class StaticModelRegistry(ObjectDetectorRegistry):
 
     def available(self) -> list[ModelInfo]:
         return [detector.info for detector in self._detectors.values()]
+
+    def close(self) -> None:
+        for detector in self._detectors.values():
+            detector.close()

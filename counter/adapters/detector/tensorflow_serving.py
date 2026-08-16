@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -21,24 +22,13 @@ DEFAULT_MAX_IMAGE_SIDE = 1024
 
 
 class TensorFlowServingDetector(ObjectDetector):
-    """Calls the TFS REST predict API for an object-detection SavedModel.
-
-    Differences from the original adapter, all of them things that bite in
-    production rather than in a demo:
-      * a connect/read timeout, so a hung TFS cannot pin every worker forever;
-      * transport-level retries for connection errors;
-      * non-2xx and malformed bodies raise DetectorUnavailableError instead of
-        a KeyError from `response.json()['predictions']`;
-      * the image is downscaled before serialisation, because the payload is
-        JSON-encoded pixel integers: a 4000x3000 photo is ~36M numbers, roughly
-        90 MB of JSON per request;
-      * float class ids resolve correctly against the int-keyed label map.
-    """
+    """Object detector backed by the TensorFlow Serving REST API."""
 
     def __init__(
         self,
         base_url: str,
         model_name: str,
+        remote_name: str | None = None,
         labels: Mapping[int, str] | None = None,
         *,
         version: str = "1",
@@ -47,13 +37,21 @@ class TensorFlowServingDetector(ObjectDetector):
         max_image_side: int = DEFAULT_MAX_IMAGE_SIDE,
     ) -> None:
         self._model_name = model_name
+        self._remote_name = remote_name or model_name
         self._version = version
         self._labels = labels if labels is not None else load_labels()
         self._max_image_side = max_image_side
-        self._url = f"{base_url.rstrip('/')}/v1/models/{model_name}:predict"
-        self._client = client or httpx.Client(
-            timeout=timeout,
-            transport=httpx.HTTPTransport(retries=2),
+        model_url = f"{base_url.rstrip('/')}/v1/models/{self._remote_name}/versions/{version}"
+        self._url = f"{model_url}:predict"
+        self._status_url = model_url
+        self._owns_client = client is None
+        self._client = (
+            client
+            if client is not None
+            else httpx.Client(
+                timeout=timeout,
+                transport=httpx.HTTPTransport(retries=2),
+            )
         )
 
     @property
@@ -86,17 +84,34 @@ class TensorFlowServingDetector(ObjectDetector):
 
         return parse_predictions(body, self._labels, self._model_name)
 
+    def health_check(self) -> None:
+        try:
+            response = self._client.get(self._status_url)
+            response.raise_for_status()
+            body = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise DetectorUnavailableError(f"{self._model_name} is not ready") from exc
+
+        statuses = body.get("model_version_status", []) if isinstance(body, dict) else []
+        if not any(
+            isinstance(item, Mapping)
+            and str(item.get("version")) == self._version
+            and item.get("state") == "AVAILABLE"
+            for item in statuses
+        ):
+            raise DetectorUnavailableError(f"{self._model_name} is not ready")
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._client.close()
+
 
 def parse_predictions(
     body: Any,
     labels: Mapping[int, str],
     model_name: str = "tfs",
 ) -> list[Prediction]:
-    """Translate a TFS predict response into domain predictions.
-
-    A module-level function so the wire format can be tested without a client,
-    a socket, or a running TensorFlow Serving.
-    """
+    """Translate a TFS response into domain predictions."""
     try:
         raw = body["predictions"][0]
     except (TypeError, KeyError, IndexError) as exc:
@@ -110,23 +125,50 @@ def parse_predictions(
     except (TypeError, KeyError, ValueError) as exc:
         raise DetectorUnavailableError(f"{model_name} response is malformed: {exc}") from exc
 
-    # Trust the shortest of the parallel arrays rather than num_detections alone:
-    # a truncated body would otherwise raise IndexError deep inside the loop.
-    usable = min(num_detections, len(boxes), len(scores), len(classes))
+    try:
+        if num_detections < 0:
+            raise ValueError("num_detections is negative")
+        usable = min(num_detections, len(boxes), len(scores), len(classes))
+    except (TypeError, ValueError) as exc:
+        raise DetectorUnavailableError(f"{model_name} response is malformed: {exc}") from exc
     if usable < num_detections:
         logger.warning(
             "truncated detection arrays",
             extra={"model": model_name, "declared": num_detections, "usable": usable},
         )
 
-    predictions: list[Prediction] = []
-    for index in range(usable):
-        ymin, xmin, ymax, xmax = boxes[index][:4]
-        predictions.append(
-            Prediction(
-                class_name=class_name_for(labels, classes[index]),
-                score=float(scores[index]),
-                box=Box(xmin=float(xmin), ymin=float(ymin), xmax=float(xmax), ymax=float(ymax)),
+    try:
+        predictions: list[Prediction] = []
+        for index in range(usable):
+            ymin, xmin, ymax, xmax = (float(value) for value in boxes[index][:4])
+            score = float(scores[index])
+            class_id = float(classes[index])
+            values = (ymin, xmin, ymax, xmax, score, class_id)
+            if not all(math.isfinite(value) for value in values):
+                raise ValueError("detection contains a non-finite value")
+            if not 0.0 <= score <= 1.0:
+                raise ValueError("detection score is outside 0..1")
+            if not class_id.is_integer():
+                raise ValueError("class id is not an integer")
+            if ymin > ymax or xmin > xmax:
+                raise ValueError("detection box is inverted")
+
+            predictions.append(
+                Prediction(
+                    class_name=class_name_for(labels, int(class_id)),
+                    score=score,
+                    box=Box(
+                        xmin=_clip(xmin),
+                        ymin=_clip(ymin),
+                        xmax=_clip(xmax),
+                        ymax=_clip(ymax),
+                    ),
+                )
             )
-        )
+    except (TypeError, ValueError, IndexError) as exc:
+        raise DetectorUnavailableError(f"{model_name} response is malformed: {exc}") from exc
     return predictions
+
+
+def _clip(value: float) -> float:
+    return min(1.0, max(0.0, value))

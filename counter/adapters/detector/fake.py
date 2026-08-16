@@ -1,10 +1,4 @@
-"""A detector that answers without a model behind it.
-
-Used by the `dev` profile and by the end-to-end tests. It is a real adapter, not
-a test double bolted on: being able to run the whole service with no GPU, no
-model download and no TensorFlow Serving container is what keeps the local
-feedback loop at seconds instead of minutes.
-"""
+"""Dependency-free detector for development and tests."""
 
 from __future__ import annotations
 
@@ -23,7 +17,7 @@ DEFAULT_PREDICTIONS: tuple[Prediction, ...] = (
 
 
 class FakeObjectDetector(ObjectDetector):
-    """Returns a fixed set of predictions, spread across the threshold range."""
+    """Return a fixed set of predictions."""
 
     def __init__(
         self,
@@ -46,7 +40,5 @@ class FakeObjectDetector(ObjectDetector):
 
     def predict(self, image: Image) -> list[Prediction]:
         if self._validate_image:
-            # Still decode: a fake backend that accepts a corrupt upload would
-            # let the dev profile pass where production returns 415.
             decode(image)
         return list(self._predictions)

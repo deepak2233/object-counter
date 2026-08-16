@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -31,6 +35,11 @@ def write_catalog(tmp_path: Path, content: str, name: str = "models.yaml") -> Pa
     return path
 
 
+@pytest.fixture(autouse=True)
+def tfs_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEST_TFS_ENDPOINT", "http://tfs.internal:8501")
+
+
 class TestModelCatalog:
     def test_loads_models_from_yaml(self, tmp_path: Path) -> None:
         catalog = ModelCatalog.from_file(write_catalog(tmp_path, CATALOG_YAML))
@@ -46,6 +55,21 @@ class TestModelCatalog:
         catalog = ModelCatalog.from_file(write_catalog(tmp_path, CATALOG_YAML))
 
         assert catalog.spec_for("rfcn").endpoint == "http://tfs.internal:8501"  # type: ignore[union-attr]
+
+    def test_rejects_an_unresolved_environment_reference(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MISSING_MODEL_HOST", raising=False)
+        content = """
+default_model: y
+models:
+  - name: y
+    framework: tensorflow-serving
+    endpoint: ${MISSING_MODEL_HOST}
+"""
+
+        with pytest.raises(ModelLoadError, match="unresolved environment reference"):
+            ModelCatalog.from_file(write_catalog(tmp_path, content))
 
     def test_rejects_a_default_that_is_not_in_the_catalog(self, tmp_path: Path) -> None:
         content = "default_model: missing\nmodels:\n  - name: fake\n    framework: fake\n"
@@ -72,6 +96,46 @@ class TestModelCatalog:
         content = "default_model: y\nmodels:\n  - name: y\n    framework: onnx\n"
 
         with pytest.raises(ModelLoadError, match="needs an artifact"):
+            ModelCatalog.from_file(write_catalog(tmp_path, content))
+
+    def test_requires_s3_artifacts_to_be_pinned(self, tmp_path: Path) -> None:
+        content = """
+default_model: y
+models:
+  - name: y
+    framework: onnx
+    artifact:
+      uri: s3://models/y.onnx
+"""
+
+        with pytest.raises(ModelLoadError, match="must pin"):
+            ModelCatalog.from_file(write_catalog(tmp_path, content))
+
+    def test_reads_the_torchvision_input_contract(self, tmp_path: Path) -> None:
+        content = """
+default_model: y
+models:
+  - name: y
+    framework: torchscript
+    input_contract: torchvision
+    artifact:
+      uri: /models/y.pt
+"""
+
+        catalog = ModelCatalog.from_file(write_catalog(tmp_path, content))
+
+        assert catalog.models[0].input_contract == "torchvision"
+
+    def test_requires_a_numeric_tensorflow_serving_version(self, tmp_path: Path) -> None:
+        content = """
+default_model: y
+models:
+  - name: y
+    framework: tensorflow-serving
+    version: latest
+"""
+
+        with pytest.raises(ModelLoadError, match="numeric TensorFlow Serving version"):
             ModelCatalog.from_file(write_catalog(tmp_path, content))
 
     def test_reports_a_missing_catalog_file(self, tmp_path: Path) -> None:
@@ -117,6 +181,57 @@ class TestArtifactStore:
     def test_rejects_an_unsupported_scheme(self, tmp_path: Path) -> None:
         with pytest.raises(ModelLoadError, match="unsupported artifact scheme"):
             ArtifactStore(tmp_path).resolve(ArtifactSpec(uri="ftp://models/model.onnx"))
+
+    def test_downloads_and_reuses_a_verified_s3_artifact(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[str] = []
+
+        class S3Client:
+            def download_file(self, bucket: str, key: str, filename: str) -> None:
+                calls.append(f"{bucket}/{key}")
+                Path(filename).write_bytes(b"weights")
+
+        monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda _: S3Client()))
+        spec = ArtifactSpec(
+            uri="s3://models/model.onnx",
+            sha256=hashlib.sha256(b"weights").hexdigest(),
+        )
+        store = ArtifactStore(tmp_path / "cache")
+
+        first = store.resolve(spec)
+        second = store.resolve(spec)
+
+        assert first == second
+        assert first.read_bytes() == b"weights"
+        assert calls == ["models/model.onnx"]
+
+    def test_parallel_s3_downloads_use_distinct_staging_files(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        barrier = threading.Barrier(2)
+        staging_paths: list[str] = []
+
+        class S3Client:
+            def download_file(self, bucket: str, key: str, filename: str) -> None:
+                staging_paths.append(filename)
+                barrier.wait()
+                Path(filename).write_bytes(b"weights")
+
+        monkeypatch.setitem(sys.modules, "boto3", SimpleNamespace(client=lambda _: S3Client()))
+        spec = ArtifactSpec(
+            uri="s3://models/model.onnx",
+            sha256=hashlib.sha256(b"weights").hexdigest(),
+        )
+        store = ArtifactStore(tmp_path / "cache")
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            resolved = list(pool.map(lambda _: store.resolve(spec), range(2)))
+
+        assert resolved[0] == resolved[1]
+        assert resolved[0].read_bytes() == b"weights"
+        assert len(set(staging_paths)) == 2
+        assert not list((tmp_path / "cache").rglob("*.part"))
 
 
 class TestCatalogModelRegistry:

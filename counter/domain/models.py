@@ -1,8 +1,4 @@
-"""Domain value objects.
-
-Everything here is immutable and dependency-free: no PIL, no HTTP client, no ORM.
-That is what lets the domain be unit tested without a single service running.
-"""
+"""Domain value objects."""
 
 from __future__ import annotations
 
@@ -35,12 +31,17 @@ class ObjectCount:
     object_class: str
     count: int
 
+    def __post_init__(self) -> None:
+        if not self.object_class:
+            raise ValueError("object_class must not be empty")
+        if self.count < 0:
+            raise ValueError("count must not be negative")
+
 
 @dataclass(frozen=True, slots=True)
 class CountResponse:
-    """Counts for the submitted image plus the running totals held by the repo."""
-
     model: str
+    model_version: str
     threshold: float
     current_objects: list[ObjectCount]
     total_objects: list[ObjectCount]
@@ -48,22 +49,14 @@ class CountResponse:
 
 @dataclass(frozen=True, slots=True)
 class DetectionResult:
-    """Payload of the detection endpoint: the predictions themselves."""
-
     model: str
+    model_version: str
     threshold: float
     predictions: list[Prediction]
 
 
 @dataclass(frozen=True, slots=True)
 class Image:
-    """An image as it crosses the domain boundary.
-
-    Bytes rather than a file handle on purpose. A `BinaryIO` is stateful: the
-    first reader exhausts it and the second one silently sees an empty stream,
-    which is exactly the class of bug that hides behind "it works in the test".
-    """
-
     content: bytes
     filename: str | None = None
     content_type: str | None = None
@@ -74,8 +67,6 @@ class Image:
 
 @dataclass(frozen=True, slots=True)
 class ModelInfo:
-    """What the service can tell a caller about a servable model."""
-
     name: str
     framework: str
     version: str = "unknown"

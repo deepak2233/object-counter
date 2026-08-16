@@ -1,13 +1,10 @@
-### Object Counter — every task you need, one command each.
-###
-### `make setup` then `make run` is enough to have the service answering
-### requests. Nothing below assumes anything is already installed except Python
-### 3.11+ and Docker.
+### Object Counter development commands.
+### Requires Python 3.11+, uv, and Docker for infrastructure targets.
 
 SHELL := /bin/bash
 VENV ?= .venv
 PY := $(VENV)/bin/python
-PIP := $(VENV)/bin/pip
+UV ?= uv
 COMPOSE ?= docker compose
 
 # Local Postgres for `make db-up` / integration tests.
@@ -33,16 +30,13 @@ help: ## Show this help
 
 ## --- setup ---------------------------------------------------------------
 
-$(VENV)/bin/activate: pyproject.toml
-	python3 -m venv $(VENV)
-	$(PIP) install --upgrade pip --quiet
-	$(PIP) install --quiet -e ".[dev]"
-	@touch $(VENV)/bin/activate
+$(VENV)/bin/activate: pyproject.toml uv.lock
+	$(UV) sync --frozen --extra dev
 
 install: $(VENV)/bin/activate ## Create the virtualenv and install the project
 
 setup: install db-up migrate ## One-shot bootstrap: virtualenv, database, schema
-	@echo "Ready. 'make run' starts the service with fakes, 'make run-prod' with real backends."
+	@echo "Ready. Use 'make run', or 'make tfs-up && make run-prod'."
 
 ## --- running -------------------------------------------------------------
 
@@ -50,7 +44,8 @@ run: install ## Run the API with fakes (no model server, no database needed)
 	COUNTER_ENV=dev $(PY) -m counter.entrypoints.api.app
 
 run-prod: install ## Run the API against Postgres and TensorFlow Serving
-	COUNTER_ENV=prod COUNTER_DATABASE_URL=$(DATABASE_URL) $(PY) -m counter.entrypoints.api.app
+	COUNTER_ENV=prod COUNTER_PERSISTENCE=sql COUNTER_DATABASE_URL=$(DATABASE_URL) \
+		$(PY) -m counter.entrypoints.api.app
 
 cli: install ## Detect on one image: make cli IMAGE=resources/images/cat.jpg THRESHOLD=0.9
 	$(PY) -m counter.entrypoints.cli detect $(or $(IMAGE),resources/images/cat.jpg) \

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 import uuid
 
@@ -16,18 +17,15 @@ from counter.observability.logging import request_id_var
 logger = logging.getLogger("counter.access")
 
 REQUEST_ID_HEADER = "X-Request-ID"
+REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
-    """Tags every request with an id, then logs one structured access line.
-
-    The id is echoed back in the response header and included in every log line
-    and error body, so a caller reporting "my request failed" hands you the key
-    to the exact trace.
-    """
+    """Assign a request ID and emit an access log."""
 
     async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
-        request_id = request.headers.get(REQUEST_ID_HEADER) or uuid.uuid4().hex
+        supplied = request.headers.get(REQUEST_ID_HEADER, "")
+        request_id = supplied if REQUEST_ID_PATTERN.fullmatch(supplied) else uuid.uuid4().hex
         token = request_id_var.set(request_id)
         started = time.perf_counter()
 
@@ -49,13 +47,7 @@ class RequestContextMiddleware(BaseHTTPMiddleware):
 
 
 class MaxBodySizeMiddleware(BaseHTTPMiddleware):
-    """Reject oversized uploads on the declared Content-Length.
-
-    Cheap first line of defence: it costs nothing and stops the obvious case
-    before the body is buffered. The real enforcement is in the route, which
-    measures the bytes it actually received — Content-Length can lie, and
-    chunked uploads do not send one at all.
-    """
+    """Reject a declared body size above the configured limit."""
 
     def __init__(self, app: object, max_bytes: int) -> None:
         super().__init__(app)  # type: ignore[arg-type]

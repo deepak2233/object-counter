@@ -6,6 +6,7 @@ from counter.adapters.repo.memory import InMemoryObjectCountRepo
 from counter.adapters.repo.sql import SqlObjectCountRepo
 from counter.bootstrap import build_registry, build_repo, build_services
 from counter.config import Settings
+from counter.domain.errors import ModelLoadError
 
 pytestmark = pytest.mark.unit
 
@@ -25,8 +26,9 @@ class TestSettings:
         assert settings.model_catalog is not None
         assert settings.model_catalog.name == "models.yaml"
 
-    def test_explicit_settings_beat_profile_defaults(self) -> None:
-        assert Settings(env="prod", persistence="memory").persistence == "memory"
+    def test_prod_rejects_in_memory_persistence(self) -> None:
+        with pytest.raises(ValueError, match="requires sql"):
+            Settings(env="prod", persistence="memory")
 
     def test_reads_the_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("COUNTER_ENV", "prod")
@@ -72,6 +74,12 @@ class TestBootstrap:
         registry = build_registry(Settings(env="dev", default_model="rfcn"))
 
         assert registry.default_model == "rfcn"  # type: ignore[attr-defined]
+
+    def test_prod_rejects_a_fake_catalog(self) -> None:
+        dev_catalog = Settings(env="dev").model_catalog
+
+        with pytest.raises(ModelLoadError, match="fake detectors"):
+            build_registry(Settings(env="prod", model_catalog=dev_catalog))
 
     def test_build_services_returns_a_usable_container(self) -> None:
         services = build_services(Settings(env="dev"))

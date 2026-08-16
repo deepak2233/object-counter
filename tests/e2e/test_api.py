@@ -1,13 +1,12 @@
-"""End-to-end: real HTTP stack, real routing, real error handling.
-
-Only the model is a fake, and that is deliberate — asserting on the output of a
-real detector would test the weights, not the service.
-"""
+"""HTTP application tests with injected detectors."""
 
 from __future__ import annotations
 
 import pytest
 from fastapi.testclient import TestClient
+
+from counter.bootstrap import Services
+from counter.domain.errors import DetectorUnavailableError
 
 pytestmark = pytest.mark.e2e
 
@@ -31,6 +30,7 @@ class TestObjectDetect:
         assert response.status_code == 200
         body = response.json()
         assert body["count"] == 2
+        assert (body["model"], body["model_version"]) == ("fake", "1")
         assert [prediction["class_name"] for prediction in body["predictions"]] == ["cat", "cat"]
         assert body["predictions"][0]["box"].keys() == {"xmin", "ymin", "xmax", "ymax"}
 
@@ -72,6 +72,7 @@ class TestObjectCount:
             {"object_class": "dog", "count": 1},
         ]
         assert body["current_total"] == 3
+        assert body["model_version"] == "1"
 
     def test_totals_accumulate_across_requests(
         self, client: TestClient, image_bytes: bytes
@@ -88,7 +89,6 @@ class TestObjectCount:
     def test_keeps_the_original_response_field_names(
         self, client: TestClient, image_bytes: bytes
     ) -> None:
-        # Clients of the original service must not have to change.
         body = post_image(client, "/object-count", image_bytes, threshold=0.5).json()
 
         assert {"current_objects", "total_objects"} <= body.keys()
@@ -98,6 +98,12 @@ class TestObjectCount:
         counted = post_image(client, "/object-count", image_bytes, threshold=0.6).json()
 
         assert counted["current_total"] == detected["count"]
+
+    def test_totals_are_isolated_by_model(self, client: TestClient, image_bytes: bytes) -> None:
+        post_image(client, "/object-count", image_bytes, model_name="fake")
+        body = post_image(client, "/object-count", image_bytes, model_name="other").json()
+
+        assert body["total_objects"] == [{"object_class": "cat", "count": 1}]
 
 
 class TestErrors:
@@ -141,12 +147,37 @@ class TestErrors:
 
         assert response.status_code == 413
         assert response.json()["error"]["type"] == "payload_too_large"
+        assert response.json()["error"]["request_id"] == response.headers["X-Request-ID"]
+
+    def test_multipart_overhead_does_not_reduce_the_file_limit(self, client: TestClient) -> None:
+        response = client.post(
+            "/object-count",
+            files={"file": ("invalid.jpg", b"x" * (1024 * 1024), "image/jpeg")},
+        )
+
+        assert response.status_code == 415
 
     def test_an_unknown_model_is_a_404(self, client: TestClient, image_bytes: bytes) -> None:
         response = post_image(client, "/object-detect", image_bytes, model_name="nope")
 
         assert response.status_code == 404
         assert response.json()["error"]["type"] == "model_not_found"
+
+    def test_detector_failures_do_not_expose_backend_details(
+        self,
+        client: TestClient,
+        services: Services,
+        image_bytes: bytes,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def fail(_: object) -> None:
+            raise DetectorUnavailableError("http://secret-model:8501 returned credentials")
+
+        monkeypatch.setattr(services.registry.get(), "predict", fail)
+        response = post_image(client, "/object-detect", image_bytes)
+
+        assert response.status_code == 503
+        assert response.json()["error"]["message"] == "detector is unavailable"
 
     def test_every_error_carries_the_request_id(
         self, client: TestClient, image_bytes: bytes
@@ -165,6 +196,24 @@ class TestOperations:
 
         assert body["status"] == "ready"
         assert body["checks"] == {"repository": "ok", "detector": "ok"}
+
+    def test_readiness_fails_when_the_detector_is_unavailable(
+        self,
+        client: TestClient,
+        services: Services,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        def unavailable() -> None:
+            raise DetectorUnavailableError("http://internal-model:8501 failed")
+
+        monkeypatch.setattr(services.registry.get(), "health_check", unavailable)
+        response = client.get("/readyz")
+
+        assert response.status_code == 503
+        assert response.json() == {
+            "status": "not_ready",
+            "checks": {"repository": "ok", "detector": "error"},
+        }
 
     def test_lists_the_servable_models(self, client: TestClient) -> None:
         body = client.get("/models").json()
@@ -187,3 +236,14 @@ class TestOperations:
         )
 
         assert response.headers["X-Request-ID"] == "trace-me"
+
+    def test_replaces_an_invalid_request_id(self, client: TestClient, image_bytes: bytes) -> None:
+        supplied = "x" * 100
+        response = client.post(
+            "/object-detect",
+            files={"file": ("cat.jpg", image_bytes, "image/jpeg")},
+            headers={"X-Request-ID": supplied},
+        )
+
+        assert response.headers["X-Request-ID"] != supplied
+        assert len(response.headers["X-Request-ID"]) == 32

@@ -2,8 +2,11 @@ name: CI
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -41,22 +44,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-          cache: pip
-          cache-dependency-path: pyproject.toml
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.11.33'
+          enable-cache: true
 
       - name: Install
-        run: pip install -e ".[dev]"
+        run: uv sync --frozen --extra dev
 
       - name: Lint
         run: |
-          ruff check .
-          ruff format --check .
+          .venv/bin/ruff check .
+          .venv/bin/ruff format --check .
 
       - name: Typecheck
-        run: mypy
+        run: .venv/bin/mypy
 
       - name: Test
-        run: pytest --cov --cov-report=term-missing
+        run: .venv/bin/pytest --cov --cov-report=term-missing
 
       - name: Build image
         run: docker build -t object-counter:${{ github.sha }} .

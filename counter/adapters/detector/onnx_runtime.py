@@ -1,8 +1,4 @@
-"""ONNX Runtime adapter: in-process inference for exported detectors.
-
-Second framework behind the same port, so the choice between "call TF Serving"
-and "run the model in this process" is a catalog entry, not a code change.
-"""
+"""ONNX Runtime detector adapter."""
 
 from __future__ import annotations
 
@@ -27,12 +23,7 @@ DEFAULT_IOU_THRESHOLD = 0.45
 
 
 class InferenceSession(Protocol):
-    """The slice of onnxruntime.InferenceSession this adapter needs.
-
-    Typing against a Protocol rather than the concrete class means the adapter
-    can be tested with a stub session: the ~200 MB onnxruntime wheel is not a
-    prerequisite for running the test suite.
-    """
+    """Subset of the ONNX Runtime session API used by the adapter."""
 
     def run(
         self, output_names: Sequence[str] | None, input_feed: dict[str, Any]
@@ -63,8 +54,13 @@ class OnnxObjectDetector(ObjectDetector):
         self._input_size = input_size
         self._score_floor = score_floor
         self._iou_threshold = iou_threshold
-        self._session = session or self._build_session(model_path, providers)
-        self._input_name = self._session.get_inputs()[0].name
+        self._session = (
+            session if session is not None else self._build_session(model_path, providers)
+        )
+        try:
+            self._input_name = self._session.get_inputs()[0].name
+        except (AttributeError, IndexError) as exc:
+            raise ModelLoadError("onnx model has no readable input") from exc
 
     @staticmethod
     def _build_session(

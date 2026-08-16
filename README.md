@@ -1,128 +1,133 @@
 # Object counter
 
-Send it an image and a confidence threshold. It detects the objects, counts the
-ones scoring above the threshold, and groups them by class.
+HTTP service for object detection and accumulated counts by class. It supports
+TensorFlow Serving, ONNX Runtime, and TorchScript behind one detector interface.
 
-## Run it
+## Local development
 
-You need Python 3.11+ and Make. Docker only if you want the database.
+Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and Make.
 
 ```bash
 make run
 ```
 
-That serves on port 5000 with a fake detector and in-memory counts. Nothing to
-download first.
+This starts the API on port 5000 with the development catalog, a fake detector,
+and in-memory counts.
 
 ```bash
-curl -F "threshold=0.9" -F "file=@resources/images/cat.jpg" localhost:5000/object-count
-curl -F "threshold=0.9" -F "file=@resources/images/cat.jpg" localhost:5000/object-detect
+curl -F "threshold=0.9" \
+  -F "file=@resources/images/cat.jpg" \
+  http://localhost:5000/object-count
 ```
 
-With Postgres behind it, so the counts survive a restart:
+## Production profile
+
+The packaged production catalog uses PostgreSQL and the `rfcn` model in
+TensorFlow Serving.
 
 ```bash
-make setup      # venv, database, migrations
+make setup
+make tfs-up
 make run-prod
 ```
 
-Or `make docker-up` for the whole stack in containers.
+`make setup` installs the locked dependencies, starts PostgreSQL, and applies
+the migrations. `make tfs-up` downloads and starts the public RFCN model used by
+the exercise.
 
-`make help` lists the rest.
+`make docker-up` starts the API and PostgreSQL with the development catalog. To
+use TensorFlow Serving in the container stack:
 
-## Endpoints
-
-| Path | What you get |
-| --- | --- |
-| `POST /object-detect` | The predictions |
-| `POST /object-count` | Counts by class for this image, plus the running totals |
-| `GET /models` | Which models this instance can serve |
-| `GET /healthz` `GET /readyz` | Liveness and readiness |
-| `GET /docs` | OpenAPI UI |
-
-Both POSTs take the same form: `file`, and optionally `threshold` (0 to 1) and
-`model_name`. Boxes come back normalised to 0..1 with the origin top-left, so
-scale them to whatever you are drawing on.
-
-Errors all look the same, and the id is in the `X-Request-ID` header too:
-
-```json
-{"error": {"type": "invalid_threshold", "message": "threshold must be between 0.0 and 1.0, got 90.0", "request_id": "9f2c…"}}
+```bash
+make tfs-up
+COUNTER_ENV=prod COUNTER_MODEL_CATALOG=/app/config/models.yaml make docker-up
 ```
 
-404 for an unknown model, 413 too big, 415 not an image, 422 a bad threshold,
-503 when the detector or the database is down.
+## API
 
-There is a CLI over the same code: `make cli IMAGE=resources/images/food.jpg`.
+| Method and path | Result |
+| --- | --- |
+| `POST /object-detect` | Predictions above the requested threshold |
+| `POST /object-count` | Current counts and accumulated totals |
+| `GET /models` | Catalog models and load state |
+| `GET /healthz` | Process liveness |
+| `GET /readyz` | Database and default-detector readiness |
+| `GET /docs` | OpenAPI UI |
+
+Both POST endpoints accept multipart fields:
+
+- `file`: required image
+- `threshold`: optional number from 0 to 1
+- `model_name`: optional catalog model name
+
+Responses include the model name and version. Accumulated counts are isolated by
+model name and version.
+
+Errors use one envelope and return the request ID in both the body and the
+`X-Request-ID` header:
+
+```json
+{
+  "error": {
+    "type": "invalid_threshold",
+    "message": "threshold must be between 0.0 and 1.0, got 90.0",
+    "request_id": "7c5f6f4eb77348b3b4e52da19a738c31"
+  }
+}
+```
 
 ## Configuration
 
-`.env.example` lists every setting. The ones you will actually touch:
+Copy `.env.example` to `.env` for local overrides. Common settings are:
 
-| Variable | Default | |
-| --- | --- | --- |
-| `COUNTER_ENV` | `dev` | `dev` is fakes and memory, `prod` is real models and Postgres |
-| `COUNTER_DATABASE_URL` | local Postgres | Any SQLAlchemy URL |
-| `COUNTER_MODEL_CATALOG` | packaged | Your own catalog of models |
-| `COUNTER_TFS_BASE_URL` | `localhost:8501` | TensorFlow Serving |
-| `COUNTER_DEFAULT_THRESHOLD` | `0.5` | Used when the request omits one |
+| Variable | Purpose |
+| --- | --- |
+| `COUNTER_ENV` | `dev`, `test`, or `prod` profile |
+| `COUNTER_PERSISTENCE` | `memory` or `sql`; production requires `sql` |
+| `COUNTER_DATABASE_URL` | SQLAlchemy database URL |
+| `COUNTER_MODEL_CATALOG` | YAML or JSON model catalog |
+| `COUNTER_TFS_BASE_URL` | TensorFlow Serving base URL |
+| `COUNTER_DEFAULT_THRESHOLD` | Threshold used when omitted |
+| `COUNTER_MAX_IMAGE_BYTES` | Upload byte limit |
+| `COUNTER_MAX_IMAGE_SIDE` | Maximum TFS input side |
 
-A bad value stops the process at startup and names the field.
+Dependencies are resolved in `uv.lock`. Optional runtime groups are `onnx`,
+`torch`, and `s3`.
 
-## Tests
+## Verification
 
 ```bash
-make test          # all 165
-make test-unit     # no I/O
+make test
+make lint
+make typecheck
 make coverage
-make lint typecheck
 ```
 
-91% coverage. The database tests run on Postgres when `TEST_DATABASE_URL` points
-at one and on SQLite when it does not. So the suite works on a laptop with
-nothing installed, and CI still runs it against the dialect that ships.
+Database tests use PostgreSQL when `TEST_DATABASE_URL` is set and SQLite
+otherwise. CI uses PostgreSQL and also builds the container image.
 
-## Layout
+## Structure
 
-```
+```text
 counter/
-  domain/       models, ports, counting logic. No I/O, no frameworks
-  adapters/
-    detector/   TF Serving, ONNX Runtime, TorchScript, fake
-    repo/       in-memory and SQL
-  entrypoints/  FastAPI app and CLI
-  config.py     typed settings
-  bootstrap.py  the only file that picks which adapter is used
-migrations/     Alembic
-tests/          unit, integration, e2e
+  domain/       value objects, ports, and use cases
+  adapters/     detector and repository implementations
+  entrypoints/  FastAPI and CLI
+  bootstrap.py  dependency construction
+migrations/     Alembic migrations
+tests/          unit, integration, and end-to-end tests
 ```
 
-Nothing in `domain/` imports from `adapters/` or `entrypoints/`.
+## Assignment map
 
-## Serving your own models
+| Task | Delivery |
+| --- | --- |
+| Prediction endpoint | `POST /object-detect` |
+| Relational repository | `counter/adapters/repo/sql.py` and `migrations/` |
+| Review and fixes | [Code review](docs/CODE_REVIEW.md) |
+| Internal models | [Multi-model setup](docs/MULTI_MODEL.md) |
+| Integration and end-to-end tests | [Testing](docs/TESTING.md) |
+| Framework extension | [Framework adapters](docs/MULTI_FRAMEWORK.md) |
 
-A model is a YAML catalog entry, not code. Point `COUNTER_MODEL_CATALOG` at your
-file, put the weights in your model store, and the name works on every endpoint.
-Artifacts can be pinned to a SHA-256, so you know what you are actually serving.
-`config/models.example.yaml` has four models across three frameworks.
-
-## Docs
-
-- [Code review](docs/CODE_REVIEW.md) of the original code: 19 findings, all fixed
-- [Architecture](docs/ARCHITECTURE.md), and the options that were rejected
-- [Internal models](docs/MULTI_MODEL.md) and [frameworks](docs/MULTI_FRAMEWORK.md)
-- [Testing](docs/TESTING.md)
-- [Decision records](docs/adr)
-
-## The exercise
-
-| # | Task | Where |
-| --- | --- | --- |
-| 1 | Endpoint returning predictions | `POST /object-detect` |
-| 2 | Relational `ObjectCountRepo` | `counter/adapters/repo/sql.py`, `migrations/` |
-| 3, 4 | Review and fixes | [CODE_REVIEW.md](docs/CODE_REVIEW.md) |
-| 5 | Internally trained models | [MULTI_MODEL.md](docs/MULTI_MODEL.md) |
-| 6a | Integration and e2e tests | [TESTING.md](docs/TESTING.md) |
-| 6b | Several frameworks | [MULTI_FRAMEWORK.md](docs/MULTI_FRAMEWORK.md) |
-
-Both halves of task 6 are done.
+The framework adapters demonstrate the extension path. A deployment should
+still run contract tests with its actual model files before release.

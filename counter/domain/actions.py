@@ -1,4 +1,4 @@
-"""Use cases. One class per thing the service does."""
+"""Application use cases."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 class DetectObjects:
-    """Return the predictions above the threshold. Reads nothing, writes nothing."""
+    """Return predictions above the threshold."""
 
     def __init__(self, object_detector: ObjectDetector) -> None:
         self._object_detector = object_detector
@@ -33,18 +33,14 @@ class DetectObjects:
         )
         return DetectionResult(
             model=self._object_detector.info.name,
+            model_version=self._object_detector.info.version,
             threshold=threshold,
             predictions=predictions,
         )
 
 
 class CountDetectedObjects:
-    """Count the detected objects by class and accumulate the running totals.
-
-    Built on top of DetectObjects rather than calling the detector itself, so the
-    two endpoints can never drift: whatever /object-detect shows is exactly what
-    /object-count counted.
-    """
+    """Count detections by class and update running totals."""
 
     def __init__(self, object_detector: ObjectDetector, object_count_repo: ObjectCountRepo) -> None:
         self._detect_objects = DetectObjects(object_detector)
@@ -54,10 +50,15 @@ class CountDetectedObjects:
         detection = self._detect_objects.execute(image, threshold)
         current_objects = count(detection.predictions)
 
-        # Increment first, then read back, so the totals returned to this caller
-        # already include this image.
-        self._object_count_repo.update_values(current_objects)
-        total_objects = self._object_count_repo.read_values()
+        self._object_count_repo.update_values(
+            detection.model,
+            detection.model_version,
+            current_objects,
+        )
+        total_objects = self._object_count_repo.read_values(
+            detection.model,
+            detection.model_version,
+        )
 
         logger.info(
             "count completed",
@@ -70,6 +71,7 @@ class CountDetectedObjects:
         )
         return CountResponse(
             model=detection.model,
+            model_version=detection.model_version,
             threshold=detection.threshold,
             current_objects=current_objects,
             total_objects=total_objects,

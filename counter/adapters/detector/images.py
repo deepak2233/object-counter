@@ -1,8 +1,4 @@
-"""Image decoding shared by every detector adapter.
-
-PIL lives here and only here on the inference side, so the domain and the ports
-stay free of it.
-"""
+"""Image decoding shared by detector adapters."""
 
 from __future__ import annotations
 
@@ -10,19 +6,20 @@ from io import BytesIO
 
 import numpy as np
 from PIL import Image as PilImage
-from PIL import UnidentifiedImageError
+from PIL import ImageOps, UnidentifiedImageError
 
 from counter.domain.errors import InvalidImageError
 from counter.domain.models import Image
 
+MAX_IMAGE_PIXELS = 25_000_000
 
-def decode(image: Image, max_bytes: int | None = None) -> PilImage.Image:
-    """Decode bytes into an RGB image.
 
-    Always converts to RGB. The upstream implementation reshaped the raw pixel
-    buffer to `(height, width, 3)`, which raises on any grayscale, CMYK or RGBA
-    input — a PNG with an alpha channel was enough to return a 500.
-    """
+def decode(
+    image: Image,
+    max_bytes: int | None = None,
+    max_pixels: int = MAX_IMAGE_PIXELS,
+) -> PilImage.Image:
+    """Decode bytes into an oriented RGB image."""
     if not image.content:
         raise InvalidImageError("image payload is empty")
 
@@ -31,8 +28,10 @@ def decode(image: Image, max_bytes: int | None = None) -> PilImage.Image:
 
     try:
         with PilImage.open(BytesIO(image.content)) as decoded:
+            if decoded.width * decoded.height > max_pixels:
+                raise InvalidImageError(f"image exceeds the {max_pixels} pixel limit")
             decoded.load()
-            return decoded.convert("RGB")
+            return ImageOps.exif_transpose(decoded).convert("RGB")
     except PilImage.DecompressionBombError as exc:
         # A 50k x 50k PNG is a few hundred KB on the wire and gigabytes in RAM.
         raise InvalidImageError("image is too large to decode safely") from exc
@@ -41,11 +40,7 @@ def decode(image: Image, max_bytes: int | None = None) -> PilImage.Image:
 
 
 def resize_longest_side(pil_image: PilImage.Image, max_side: int) -> PilImage.Image:
-    """Downscale so the longest side is at most `max_side`, preserving aspect.
-
-    Boxes are normalised, so downscaling costs a little accuracy on small objects
-    and buys a bounded request payload and a bounded latency.
-    """
+    """Downscale while preserving the aspect ratio."""
     longest = max(pil_image.size)
     if max_side <= 0 or longest <= max_side:
         return pil_image
@@ -56,5 +51,5 @@ def resize_longest_side(pil_image: PilImage.Image, max_side: int) -> PilImage.Im
 
 
 def to_uint8_array(pil_image: PilImage.Image) -> np.ndarray:
-    """(height, width, 3) uint8 array. `np.asarray` avoids a copy where it can."""
+    """Return a height-width-channel uint8 array."""
     return np.asarray(pil_image, dtype=np.uint8)

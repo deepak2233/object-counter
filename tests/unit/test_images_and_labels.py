@@ -40,6 +40,10 @@ class TestDecode:
         with pytest.raises(InvalidImageError, match="limit is"):
             decode(Image(content=image_bytes), max_bytes=10)
 
+    def test_rejects_an_image_over_the_pixel_limit(self, image_bytes: bytes) -> None:
+        with pytest.raises(InvalidImageError, match="pixel limit"):
+            decode(Image(content=image_bytes), max_pixels=10)
+
 
 class TestResize:
     def test_downscales_the_longest_side_and_keeps_the_aspect_ratio(self) -> None:

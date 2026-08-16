@@ -1,9 +1,4 @@
-"""Pre- and post-processing for single-stage ONNX detectors (YOLO family).
-
-Deliberately free of onnxruntime: this is where the arithmetic bugs live —
-letterbox padding, xywh/xyxy confusion, NMS, coordinate normalisation — so it
-has to be testable with numpy alone, on any machine, in milliseconds.
-"""
+"""YOLO-style preprocessing and postprocessing."""
 
 from __future__ import annotations
 
@@ -16,11 +11,7 @@ from counter.domain.models import Box, Prediction
 
 
 class LetterboxTransform:
-    """Records how an image was fitted into the square model input.
-
-    Needed to map boxes back: without the pad and scale, every prediction is
-    offset by the grey bars.
-    """
+    """Image scale and padding used for coordinate restoration."""
 
     __slots__ = ("original_height", "original_width", "pad_x", "pad_y", "scale")
 
@@ -72,8 +63,13 @@ def xywh_to_xyxy(boxes: np.ndarray) -> np.ndarray:
     )
 
 
-def non_max_suppression(boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> list[int]:
-    """Greedy NMS over corner-form boxes. Returns kept indices, highest score first."""
+def non_max_suppression(
+    boxes: np.ndarray,
+    scores: np.ndarray,
+    iou_threshold: float,
+    class_ids: np.ndarray | None = None,
+) -> list[int]:
+    """Greedy class-aware NMS over corner-form boxes."""
     if boxes.size == 0:
         return []
 
@@ -97,7 +93,12 @@ def non_max_suppression(boxes: np.ndarray, scores: np.ndarray, iou_threshold: fl
 
         union = areas[current] + areas[rest] - intersection
         iou = np.divide(intersection, union, out=np.zeros_like(union), where=union > 0)
-        order = rest[iou <= iou_threshold]
+        same_class = (
+            np.ones(rest.shape, dtype=bool)
+            if class_ids is None
+            else class_ids[rest] == class_ids[current]
+        )
+        order = rest[(~same_class) | (iou <= iou_threshold)]
 
     return kept
 
@@ -111,16 +112,11 @@ def decode_yolo_output(
     iou_threshold: float = 0.45,
     max_detections: int = 300,
 ) -> list[Prediction]:
-    """Turn a YOLOv8-style tensor into domain predictions.
-
-    Accepts (1, 4 + num_classes, num_boxes) — the v8 export layout — as well as
-    the transposed (1, num_boxes, 4 + num_classes).
-
-    `score_threshold` here is a backend floor that keeps NMS cheap; it is not the
-    caller's threshold, which the domain applies afterwards. Keep it well below
-    any threshold a caller would send.
-    """
-    predictions_tensor = np.asarray(raw_output)
+    """Decode either common YOLOv8 output orientation."""
+    try:
+        predictions_tensor = np.asarray(raw_output, dtype=np.float32)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("detector output is not numeric") from exc
     if predictions_tensor.ndim == 3:
         predictions_tensor = predictions_tensor[0]
     if predictions_tensor.ndim != 2:
@@ -133,6 +129,12 @@ def decode_yolo_output(
     class_scores = predictions_tensor[:, 4:]
     if class_scores.size == 0:
         return []
+    if not np.isfinite(predictions_tensor).all():
+        raise ValueError("detector output contains a non-finite value")
+    if np.any(boxes_xywh[:, 2:] < 0):
+        raise ValueError("detector output contains a negative box size")
+    if np.any((class_scores < 0) | (class_scores > 1)):
+        raise ValueError("detector output contains a score outside 0..1")
 
     class_ids = class_scores.argmax(axis=1)
     scores = class_scores.max(axis=1)
@@ -147,7 +149,7 @@ def decode_yolo_output(
         return []
 
     boxes_xyxy = xywh_to_xyxy(boxes_xywh)
-    kept = non_max_suppression(boxes_xyxy, scores, iou_threshold)[:max_detections]
+    kept = non_max_suppression(boxes_xyxy, scores, iou_threshold, class_ids)[:max_detections]
 
     return [
         Prediction(
@@ -160,13 +162,7 @@ def decode_yolo_output(
 
 
 def _is_channels_first(tensor: np.ndarray, num_classes: int) -> bool:
-    """Decide whether the tensor is (channels, boxes) and needs transposing.
-
-    When the label map is known, the channel axis is identifiable exactly: it is
-    the one of length `4 + num_classes`. Only when it is not (a model served
-    without labels) does this fall back to "boxes outnumber channels", which is
-    true for every real export but not for a hand-built single-box tensor.
-    """
+    """Return whether the tensor uses channels-first output."""
     rows, columns = tensor.shape
     if num_classes:
         expected = 4 + num_classes
