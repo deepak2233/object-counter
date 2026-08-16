@@ -1,15 +1,10 @@
-"""The model catalog: a declarative list of what this service can serve.
-
-Adding an internally trained model is a catalog entry plus an artifact in the
-model store — no code change, no rebuild. Validation happens at load time with
-pydantic, so a typo in the catalog fails at startup with a precise message
-instead of at 3am with a KeyError.
-"""
+"""Validated model catalog."""
 
 from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,39 +14,45 @@ from pydantic import BaseModel, Field, model_validator
 from counter.domain.errors import ModelLoadError
 
 Framework = Literal["tensorflow-serving", "onnx", "torchscript", "fake"]
+ENV_REFERENCE = re.compile(r"\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)")
 
 
 class ArtifactSpec(BaseModel):
-    """Where a model file lives and what it must hash to."""
+    """Model artifact location and optional checksum."""
 
-    uri: str
+    model_config = {"extra": "forbid"}
+
+    uri: str = Field(min_length=1)
     sha256: str | None = Field(
         default=None,
-        description="Expected digest. Set it for anything that leaves the build: "
-        "it is the difference between 'we serve model 1.4.2' and 'we serve "
-        "whatever was in the bucket'.",
+        pattern=r"^[0-9a-fA-F]{64}$",
+        description="Expected SHA-256 digest.",
     )
 
 
 class ModelSpec(BaseModel):
     model_config = {"extra": "forbid", "protected_namespaces": ()}
 
-    name: str
+    name: str = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9._-]+$")
     framework: Framework
-    version: str = "1"
+    version: str = Field(default="1", min_length=1, max_length=64)
     labels: str | None = None
 
     # onnx / torchscript
     artifact: ArtifactSpec | None = None
-    input_size: int = 640
-    score_floor: float = 0.05
-    iou_threshold: float = 0.45
+    input_size: int = Field(default=640, gt=0)
+    input_contract: Literal["yolov8", "torchvision"] = "yolov8"
+    score_floor: float = Field(default=0.05, ge=0.0, le=1.0)
+    iou_threshold: float = Field(default=0.45, ge=0.0, le=1.0)
     device: str = "cpu"
 
     # tensorflow-serving
     endpoint: str | None = None
     remote_name: str | None = Field(
         default=None,
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9._-]+$",
         description="Model name inside TF Serving when it differs from the catalog name.",
     )
 
@@ -59,6 +60,16 @@ class ModelSpec(BaseModel):
     def _check_backend_requirements(self) -> ModelSpec:
         if self.framework in {"onnx", "torchscript"} and self.artifact is None:
             raise ValueError(f"model '{self.name}' ({self.framework}) needs an artifact")
+        if self.framework not in {"onnx", "torchscript"} and self.artifact is not None:
+            raise ValueError(f"model '{self.name}' does not use an artifact")
+        if self.framework != "tensorflow-serving" and (self.endpoint or self.remote_name):
+            raise ValueError(f"model '{self.name}' does not use a serving endpoint")
+        if self.artifact and self.artifact.uri.startswith("s3://") and not self.artifact.sha256:
+            raise ValueError(f"model '{self.name}' must pin its S3 artifact with sha256")
+        if self.framework == "tensorflow-serving" and not self.version.isdigit():
+            raise ValueError(f"model '{self.name}' needs a numeric TensorFlow Serving version")
+        if self.input_contract == "torchvision" and self.framework != "torchscript":
+            raise ValueError("torchvision input_contract is only valid for torchscript")
         return self
 
 
@@ -83,11 +94,7 @@ class ModelCatalog(BaseModel):
 
     @classmethod
     def from_file(cls, path: str | Path) -> ModelCatalog:
-        """Load a YAML or JSON catalog, expanding ${ENV_VAR} references.
-
-        Environment expansion keeps endpoints and bucket names out of the file,
-        so the same catalog is deployable to dev, staging and production.
-        """
+        """Load YAML or JSON and expand environment references."""
         catalog_path = Path(path)
         if not catalog_path.is_file():
             raise ModelLoadError(f"model catalog not found: {catalog_path}")
@@ -100,7 +107,32 @@ class ModelCatalog(BaseModel):
         except (yaml.YAMLError, json.JSONDecodeError) as exc:
             raise ModelLoadError(f"model catalog {catalog_path} is not parseable: {exc}") from exc
 
+        unresolved = _find_environment_reference(data)
+        if unresolved:
+            raise ModelLoadError(f"unresolved environment reference {unresolved}")
+
         try:
             return cls.model_validate(data)
         except ValueError as exc:
             raise ModelLoadError(f"model catalog {catalog_path} is invalid: {exc}") from exc
+
+
+def _find_environment_reference(value: Any) -> str | None:
+    if isinstance(value, str):
+        regex_match = ENV_REFERENCE.search(value)
+        return regex_match.group(0) if regex_match else None
+    if isinstance(value, dict):
+        return next(
+            (
+                reference
+                for item in value.values()
+                if (reference := _find_environment_reference(item))
+            ),
+            None,
+        )
+    if isinstance(value, list):
+        return next(
+            (reference for item in value if (reference := _find_environment_reference(item))),
+            None,
+        )
+    return None

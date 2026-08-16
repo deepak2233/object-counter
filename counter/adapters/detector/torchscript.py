@@ -1,14 +1,9 @@
-"""TorchScript adapter: third framework, same port.
-
-Handles the two output conventions worth supporting:
-  * torchvision detection models -> [{"boxes": [[x1,y1,x2,y2], ...], "labels":
-    [...], "scores": [...]}], boxes in input-pixel coordinates;
-  * exported single-stage detectors -> one raw tensor, decoded like the ONNX path.
-"""
+"""TorchScript detector adapter."""
 
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -41,6 +36,9 @@ class TorchScriptObjectDetector(ObjectDetector):
         name: str = "torchscript",
         version: str = "1",
         input_size: int = DEFAULT_INPUT_SIZE,
+        input_contract: str = "yolov8",
+        score_floor: float = 0.05,
+        iou_threshold: float = 0.45,
         device: str = "cpu",
         module: Any | None = None,
     ) -> None:
@@ -48,8 +46,11 @@ class TorchScriptObjectDetector(ObjectDetector):
         self._version = version
         self._labels = labels or {}
         self._input_size = input_size
+        self._input_contract = input_contract
+        self._score_floor = score_floor
+        self._iou_threshold = iou_threshold
         self._device = device
-        self._module = module or self._load_module(model_path, device)
+        self._module = module if module is not None else self._load_module(model_path, device)
 
     @staticmethod
     def _load_module(model_path: str | Path | None, device: str) -> Any:
@@ -87,17 +88,37 @@ class TorchScriptObjectDetector(ObjectDetector):
 
     def predict(self, image: Image) -> list[Prediction]:
         pixels = to_uint8_array(decode(image))
-        letterboxed, transform = letterbox(pixels, self._input_size)
-        model_input = to_nchw_float(letterboxed)
+        if self._input_contract == "torchvision":
+            height, width = pixels.shape[:2]
+            transform = LetterboxTransform(1.0, 0.0, 0.0, width, height)
+            model_input: Any = [self._to_tensor(_to_chw_float(pixels))]
+        else:
+            letterboxed, transform = letterbox(pixels, self._input_size)
+            model_input = self._to_tensor(to_nchw_float(letterboxed))
 
         try:
-            output = self._module(self._to_tensor(model_input))
+            output = self._run_module(model_input)
         except Exception as exc:
             raise DetectorUnavailableError(
                 f"torchscript inference failed for {self._name}: {exc}"
             ) from exc
 
-        return self._to_predictions(output, transform)
+        try:
+            return self._to_predictions(output, transform)
+        except DetectorUnavailableError:
+            raise
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise DetectorUnavailableError(
+                f"torchscript model {self._name} returned invalid detections: {exc}"
+            ) from exc
+
+    def _run_module(self, model_input: Any) -> Any:
+        try:
+            import torch
+        except ImportError:
+            return self._module(model_input)
+        with torch.inference_mode():
+            return self._module(model_input)
 
     def _to_tensor(self, array: np.ndarray) -> Any:
         try:
@@ -113,7 +134,13 @@ class TorchScriptObjectDetector(ObjectDetector):
             return self._from_torchvision_dict(detections, transform)
 
         try:
-            return decode_yolo_output(_as_numpy(detections), transform, self._labels)
+            return decode_yolo_output(
+                _as_numpy(detections),
+                transform,
+                self._labels,
+                score_threshold=self._score_floor,
+                iou_threshold=self._iou_threshold,
+            )
         except ValueError as exc:
             raise DetectorUnavailableError(
                 f"torchscript model {self._name} returned an unsupported output layout: {exc}"
@@ -127,12 +154,22 @@ class TorchScriptObjectDetector(ObjectDetector):
         labels = _as_numpy(detections["labels"]).reshape(-1)
 
         predictions: list[Prediction] = []
-        for index in range(len(scores)):
+        for index in range(min(len(boxes), len(scores), len(labels))):
             xmin, ymin, xmax, ymax = (float(value) for value in boxes[index])
+            score = float(scores[index])
+            class_id = float(labels[index])
+            if not all(math.isfinite(value) for value in (xmin, ymin, xmax, ymax, score, class_id)):
+                raise ValueError("detection contains a non-finite value")
+            if not 0.0 <= score <= 1.0:
+                raise ValueError("detection score is outside 0..1")
+            if not class_id.is_integer():
+                raise ValueError("class id is not an integer")
+            if xmin > xmax or ymin > ymax:
+                raise ValueError("detection box is inverted")
             predictions.append(
                 Prediction(
-                    class_name=class_name_for(self._labels, int(labels[index])),
-                    score=float(scores[index]),
+                    class_name=class_name_for(self._labels, int(class_id)),
+                    score=score,
                     box=_normalise(xmin, ymin, xmax, ymax, transform),
                 )
             )
@@ -161,3 +198,8 @@ def _as_numpy(value: Any) -> np.ndarray:
     if detach is not None:
         value = detach().cpu().numpy()
     return np.asarray(value)
+
+
+def _to_chw_float(image: np.ndarray) -> np.ndarray:
+    normalised = image.astype(np.float32) / 255.0
+    return np.ascontiguousarray(normalised.transpose(2, 0, 1))

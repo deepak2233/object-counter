@@ -17,6 +17,7 @@ from counter.entrypoints.api.routes import router
 from counter.observability.logging import configure_logging
 
 logger = logging.getLogger(__name__)
+MULTIPART_OVERHEAD_BYTES = 64 * 1024
 
 DESCRIPTION = """
 Detects objects in an image and counts the ones above a confidence threshold,
@@ -29,11 +30,7 @@ grouped by class.
 
 
 def create_app(settings: Settings | None = None, services: Services | None = None) -> FastAPI:
-    """Build the app.
-
-    `services` is injectable so tests can run the real HTTP stack against a fake
-    detector and a throwaway database without monkeypatching module globals.
-    """
+    """Build the application with optional injected services."""
     settings = settings or (services.settings if services else Settings())
     configure_logging(settings.log_level, settings.log_format)
 
@@ -50,14 +47,15 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
         description=DESCRIPTION,
         version="1.0.0",
         lifespan=lifespan,
-        # Docs stay on in every profile: an API nobody can read is an API nobody
-        # can integrate against. Turn them off here if the service is public.
         docs_url="/docs",
         openapi_url="/openapi.json",
     )
 
+    app.add_middleware(
+        MaxBodySizeMiddleware,
+        max_bytes=settings.max_image_bytes + MULTIPART_OVERHEAD_BYTES,
+    )
     app.add_middleware(RequestContextMiddleware)
-    app.add_middleware(MaxBodySizeMiddleware, max_bytes=settings.max_image_bytes)
     if settings.cors_allow_origins:
         app.add_middleware(
             CORSMiddleware,
@@ -72,7 +70,7 @@ def create_app(settings: Settings | None = None, services: Services | None = Non
 
 
 def main() -> None:
-    """`python -m counter.entrypoints.api.app` — the local dev server."""
+    """Run the local development server."""
     import uvicorn
 
     settings = Settings()

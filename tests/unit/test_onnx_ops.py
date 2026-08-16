@@ -67,6 +67,13 @@ class TestNonMaxSuppression:
 
         assert sorted(non_max_suppression(boxes, scores, iou_threshold=0.5)) == [0, 1]
 
+    def test_keeps_overlapping_boxes_from_different_classes(self) -> None:
+        boxes = np.array([[0, 0, 10, 10], [1, 1, 11, 11]], dtype=float)
+        scores = np.array([0.9, 0.8])
+        classes = np.array([0, 1])
+
+        assert non_max_suppression(boxes, scores, 0.5, classes) == [0, 1]
+
     def test_handles_an_empty_input(self) -> None:
         assert non_max_suppression(np.zeros((0, 4)), np.zeros(0), 0.5) == []
 
@@ -136,3 +143,17 @@ class TestDecodeYoloOutput:
 
         with pytest.raises(ValueError, match="unexpected detector output shape"):
             decode_yolo_output(np.zeros((2, 3, 4, 5)), transform, LABELS)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            [[100.0, 100.0, -20.0, 20.0, 0.9, 0.1]],
+            [[100.0, 100.0, 20.0, 20.0, 1.1, 0.1]],
+            [[100.0, 100.0, 20.0, 20.0, float("nan"), 0.1]],
+        ],
+    )
+    def test_rejects_invalid_detector_values(self, raw: list[list[float]]) -> None:
+        _, transform = letterbox(np.zeros((640, 640, 3), dtype=np.uint8), 640)
+
+        with pytest.raises(ValueError):
+            decode_yolo_output(self.raw_output(raw), transform, LABELS)

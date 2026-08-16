@@ -1,8 +1,4 @@
-"""Wire format. Pydantic models, so the OpenAPI schema is generated, not written.
-
-Response models are separate from the domain models on purpose: the API contract
-has to stay stable while the domain is free to change shape.
-"""
+"""HTTP request and response schemas."""
 
 from __future__ import annotations
 
@@ -53,11 +49,12 @@ class ObjectCountSchema(BaseModel):
 
 
 class DetectResponseSchema(BaseModel):
-    """Response of POST /object-detect (assignment task 1)."""
+    """Response of POST /object-detect."""
 
     model_config = {"protected_namespaces": ()}
 
     model: str = Field(description="Model that produced these predictions")
+    model_version: str
     threshold: float
     count: int = Field(description="Number of predictions above the threshold")
     predictions: list[PredictionSchema]
@@ -66,6 +63,7 @@ class DetectResponseSchema(BaseModel):
     def of(cls, result: DetectionResult) -> DetectResponseSchema:
         return cls(
             model=result.model,
+            model_version=result.model_version,
             threshold=result.threshold,
             count=len(result.predictions),
             predictions=[PredictionSchema.of(prediction) for prediction in result.predictions],
@@ -73,15 +71,12 @@ class DetectResponseSchema(BaseModel):
 
 
 class CountResponseSchema(BaseModel):
-    """Response of POST /object-count.
-
-    `current_objects` and `total_objects` keep the field names of the original
-    service so existing clients keep working; the two totals are additive.
-    """
+    """Response of POST /object-count."""
 
     model_config = {"protected_namespaces": ()}
 
     model: str
+    model_version: str
     threshold: float
     current_objects: list[ObjectCountSchema]
     current_total: int = Field(description="Objects counted in this image")
@@ -92,6 +87,7 @@ class CountResponseSchema(BaseModel):
     def of(cls, response: CountResponse) -> CountResponseSchema:
         return cls(
             model=response.model,
+            model_version=response.model_version,
             threshold=response.threshold,
             current_objects=[ObjectCountSchema.of(item) for item in response.current_objects],
             current_total=sum(item.count for item in response.current_objects),

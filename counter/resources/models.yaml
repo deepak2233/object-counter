@@ -2,10 +2,9 @@
 #
 # Values may reference environment variables (${VAR}); they are expanded when the
 # catalog is read. Add a model here, put its artifact in the model store, and it
-# is servable at POST /object-detect?model_name=<name> — no code change.
+# is servable at POST /object-detect?model_name=<name>.
 #
-# See docs/MULTI_MODEL.md for the private-model workflow and
-# config/models.example.yaml for ONNX/TorchScript/S3 entries.
+# See docs/MULTI_MODEL.md for privately trained models.
 
 default_model: rfcn
 
@@ -15,7 +14,3 @@ models:
     version: "1"
     labels: mscoco_label_map.json
     # endpoint defaults to COUNTER_TFS_BASE_URL when omitted.
-
-  - name: fake
-    framework: fake
-    version: "1"

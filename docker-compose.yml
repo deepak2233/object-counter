@@ -37,11 +37,11 @@ services:
     ports:
       - "${API_PORT:-5000}:5000"
     environment:
-      COUNTER_ENV: prod
+      COUNTER_ENV: ${COUNTER_ENV:-dev}
+      COUNTER_PERSISTENCE: sql
       COUNTER_DATABASE_URL: postgresql+psycopg://${DB_USER:-counter}:${DB_PASSWORD:-counter}@postgres:5432/${DB_NAME:-object_counter}
       COUNTER_TFS_BASE_URL: http://tfserving:8501
-      # The dev catalog serves the fake detector, so the stack is useful before
-      # any model is downloaded. Point at models.yaml once TF Serving is up.
+      # The dev catalog keeps the default stack independent of a model server.
       COUNTER_MODEL_CATALOG: ${COUNTER_MODEL_CATALOG:-/app/config/models.dev.yaml}
       COUNTER_LOG_FORMAT: json
     volumes:

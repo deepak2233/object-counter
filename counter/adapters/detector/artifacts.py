@@ -1,16 +1,10 @@
-"""Fetching and verifying model weights.
-
-Internally trained models cannot be `wget`-ed from a public bucket in a README,
-which is what the original setup did. They come from a private store, they are
-pinned by digest, and they are cached on disk so a pod restart does not re-pull
-gigabytes. See docs/MULTI_MODEL.md.
-"""
+"""Fetch, verify, and cache model artifacts."""
 
 from __future__ import annotations
 
 import hashlib
 import logging
-import shutil
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -23,15 +17,7 @@ CHUNK_BYTES = 1024 * 1024
 
 
 class ArtifactStore:
-    """Resolves an artifact URI to a local file, verifying its digest.
-
-    Supported schemes:
-      * `file://` or a bare path — local or a mounted volume (PVC, NFS);
-      * `s3://bucket/key` — any S3-compatible store (AWS, MinIO, Ceph), using
-        boto3 credentials from the environment or the instance role.
-
-    A new scheme is a new `_fetch_*` method; nothing else changes.
-    """
+    """Resolve local and S3 artifact URIs to verified files."""
 
     def __init__(self, cache_dir: str | Path = "var/models") -> None:
         self._cache_dir = Path(cache_dir)
@@ -53,6 +39,8 @@ class ArtifactStore:
         raise ModelLoadError(f"unsupported artifact scheme '{scheme}' in {spec.uri}")
 
     def _fetch_s3(self, bucket: str, key: str, spec: ArtifactSpec) -> Path:
+        if not bucket or not key:
+            raise ModelLoadError(f"invalid S3 artifact URI: {spec.uri}")
         target = self._cache_path(spec, Path(key).name)
         if target.is_file():
             self._verify(target, spec.sha256)
@@ -66,8 +54,11 @@ class ArtifactStore:
                 "boto3 is not installed; install the 's3' extra to fetch models from S3"
             ) from exc
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        staging = target.with_suffix(target.suffix + ".part")
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise ModelLoadError(f"could not create model cache {target.parent}: {exc}") from exc
+        staging = target.with_suffix(f"{target.suffix}.{uuid.uuid4().hex}.part")
         logger.info("downloading model artifact", extra={"bucket": bucket, "key": key})
         try:
             boto3.client("s3").download_file(bucket, key, str(staging))
@@ -75,15 +66,21 @@ class ArtifactStore:
             staging.unlink(missing_ok=True)
             raise ModelLoadError(f"could not download s3://{bucket}/{key}: {exc}") from exc
 
-        self._verify(staging, spec.sha256)
-        # Rename last: a crashed download must never be picked up as a valid
-        # cache entry by the next process to start.
-        shutil.move(str(staging), str(target))
+        try:
+            self._verify(staging, spec.sha256)
+            staging.replace(target)
+        except ModelLoadError:
+            staging.unlink(missing_ok=True)
+            raise
+        except OSError as exc:
+            staging.unlink(missing_ok=True)
+            raise ModelLoadError(f"could not cache model artifact at {target}: {exc}") from exc
         return target
 
     def _cache_path(self, spec: ArtifactSpec, filename: str) -> Path:
-        # Digest-addressed when pinned, so two versions never collide in cache.
-        prefix = spec.sha256[:16] if spec.sha256 else "unpinned"
+        prefix = (
+            spec.sha256[:16] if spec.sha256 else hashlib.sha256(spec.uri.encode()).hexdigest()[:16]
+        )
         return self._cache_dir / prefix / filename
 
     @staticmethod
@@ -92,7 +89,10 @@ class ArtifactStore:
             logger.warning("model artifact is not pinned to a digest", extra={"path": str(path)})
             return
 
-        actual = sha256_of(path)
+        try:
+            actual = sha256_of(path)
+        except OSError as exc:
+            raise ModelLoadError(f"could not read model artifact {path}: {exc}") from exc
         if actual.lower() != expected_sha256.lower():
             raise ModelLoadError(
                 f"checksum mismatch for {path}: expected {expected_sha256}, got {actual}"

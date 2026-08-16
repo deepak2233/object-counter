@@ -11,33 +11,33 @@ requires-python = ">=3.11"
 license = { text = "MIT" }
 
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.27",
-    "python-multipart>=0.0.9",
-    "pydantic>=2.6",
-    "pydantic-settings>=2.2",
-    "httpx>=0.27",
-    "numpy>=1.26",
-    "pillow>=10.2",
-    "SQLAlchemy>=2.0.25",
-    "alembic>=1.13",
-    "psycopg[binary]>=3.1",
-    "PyYAML>=6.0",
+    "fastapi>=0.110,<1",
+    "uvicorn[standard]>=0.27,<1",
+    "python-multipart>=0.0.9,<1",
+    "pydantic>=2.6,<3",
+    "pydantic-settings>=2.2,<3",
+    "httpx>=0.27,<1",
+    "numpy>=1.26,<2",
+    "pillow>=10.2,<13",
+    "SQLAlchemy>=2.0.25,<3",
+    "alembic>=1.13,<2",
+    "psycopg[binary]>=3.1,<4",
+    "PyYAML>=6.0,<7",
 ]
 
 [project.optional-dependencies]
 # Inference backends are optional so that a deployment only installs the runtime
 # it actually serves. See docs/MULTI_FRAMEWORK.md.
-onnx = ["onnxruntime>=1.17"]
-torch = ["torch>=2.2"]
+onnx = ["onnxruntime>=1.17,<2"]
+torch = ["torch>=2.2,<3"]
 # Artifact stores for privately trained models. See docs/MULTI_MODEL.md.
-s3 = ["boto3>=1.34"]
+s3 = ["boto3>=1.34,<2"]
 dev = [
-    "pytest>=8.0",
-    "pytest-cov>=4.1",
-    "ruff>=0.4",
-    "mypy>=1.9",
-    "types-PyYAML>=6.0",
+    "pytest>=8.0,<9",
+    "pytest-cov>=4.1,<8",
+    "ruff>=0.4,<1",
+    "mypy>=1.9,<2",
+    "types-PyYAML>=6.0,<7",
 ]
 
 [project.scripts]
@@ -52,8 +52,6 @@ counter = ["resources/*.json", "resources/*.txt", "resources/*.yaml"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# Markdown is documentation, and the code blocks in docs/ quote the original
-# service verbatim. Reformatting them would silently rewrite the evidence.
 extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
@@ -98,6 +96,7 @@ omit = ["counter/entrypoints/cli.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
+fail_under = 90
 exclude_lines = [
     "pragma: no cover",
     "raise NotImplementedError",

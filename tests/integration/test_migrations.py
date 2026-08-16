@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 from alembic import command
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from counter.adapters.repo.sql import build_engine
 from tests.conftest import alembic_config
@@ -25,7 +25,13 @@ def test_upgrade_creates_the_counts_table(
         inspector = inspect(engine)
         assert "object_counts" in inspector.get_table_names()
         columns = {column["name"] for column in inspector.get_columns("object_counts")}
-        assert columns == {"object_class", "count", "updated_at"}
+        assert columns == {
+            "model_name",
+            "model_version",
+            "object_class",
+            "count",
+            "updated_at",
+        }
     finally:
         command.downgrade(config, "base")
         engine.dispose()
@@ -34,8 +40,6 @@ def test_upgrade_creates_the_counts_table(
 def test_downgrade_removes_the_counts_table(
     database_url: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A migration nobody can roll back is a migration nobody can deploy on a
-    # Friday.
     monkeypatch.setenv("COUNTER_DATABASE_URL", database_url)
     config = alembic_config()
     engine = build_engine(database_url)
@@ -46,4 +50,30 @@ def test_downgrade_removes_the_counts_table(
 
         assert "object_counts" not in inspect(engine).get_table_names()
     finally:
+        engine.dispose()
+
+
+def test_upgrade_preserves_existing_counts(
+    database_url: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("COUNTER_DATABASE_URL", database_url)
+    config = alembic_config()
+    engine = build_engine(database_url)
+
+    try:
+        command.upgrade(config, "0001")
+        with engine.begin() as connection:
+            connection.execute(
+                text("INSERT INTO object_counts (object_class, count) VALUES ('cat', 3)")
+            )
+
+        command.upgrade(config, "head")
+        with engine.connect() as connection:
+            row = connection.execute(
+                text("SELECT model_name, model_version, object_class, count FROM object_counts")
+            ).one()
+
+        assert tuple(row) == ("legacy", "unknown", "cat", 3)
+    finally:
+        command.downgrade(config, "base")
         engine.dispose()

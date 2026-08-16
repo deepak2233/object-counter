@@ -47,8 +47,3 @@ models:
     labels: mscoco_label_map.json
     endpoint: ${TFS_BASE_URL}
     remote_name: rfcn
-
-  # Always keep one dependency-free entry: it makes smoke tests and readiness
-  # checks possible on an environment with no weights at all.
-  - name: fake
-    framework: fake

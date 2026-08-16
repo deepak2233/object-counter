@@ -1,10 +1,4 @@
-"""Domain errors.
-
-The domain raises these; the entrypoint layer is the only place that knows how
-they map onto HTTP status codes (see counter/entrypoints/api/errors.py). Adapters
-translate infrastructure failures (httpx, SQLAlchemy, onnxruntime) into these so
-that no driver-specific exception ever reaches a caller.
-"""
+"""Errors shared across the application boundary."""
 
 from __future__ import annotations
 
@@ -18,7 +12,11 @@ class InvalidThresholdError(ObjectCounterError):
 
 
 class InvalidImageError(ObjectCounterError):
-    """Payload is empty, too large, or not a decodable image."""
+    """Payload is empty or not a decodable image."""
+
+
+class PayloadTooLargeError(ObjectCounterError):
+    """The uploaded image exceeds the configured limit."""
 
 
 class ModelNotFoundError(ObjectCounterError):

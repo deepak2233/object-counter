@@ -29,6 +29,7 @@ class TestDetectObjects:
 
         assert [prediction.class_name for prediction in result.predictions] == ["cat", "cat"]
         assert result.model == "fake"
+        assert result.model_version == "1"
         assert result.threshold == 0.7
 
     def test_reports_the_threshold_it_applied(
@@ -82,4 +83,9 @@ class TestCountDetectedObjects:
         response = CountDetectedObjects(detector, repo).execute(image, 1.0)
 
         assert response.current_objects == []
-        assert repo.read_values() == []
+        assert repo.read_values("fake", "1") == []
+
+
+def test_object_count_rejects_negative_values() -> None:
+    with pytest.raises(ValueError, match="must not be negative"):
+        ObjectCount("cat", -1)

@@ -73,6 +73,30 @@ class TestParsePredictions:
         assert len(parse_predictions(body, LABELS)) == 1
 
     @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("detection_boxes", [[0.1, 0.2, 0.3]]),
+            ("detection_scores", [1.5]),
+            ("detection_classes", [17.5]),
+        ],
+    )
+    def test_rejects_malformed_detections(self, field: str, value: list) -> None:
+        body = {
+            "predictions": [
+                {
+                    "num_detections": 1,
+                    "detection_boxes": [[0.1, 0.2, 0.3, 0.4]],
+                    "detection_scores": [0.9],
+                    "detection_classes": [17.0],
+                    field: value,
+                }
+            ]
+        }
+
+        with pytest.raises(DetectorUnavailableError, match="malformed"):
+            parse_predictions(body, LABELS)
+
+    @pytest.mark.parametrize(
         "body",
         [{}, {"predictions": []}, {"predictions": [{"num_detections": "many"}]}],
     )
@@ -91,7 +115,7 @@ class TestTensorFlowServingDetector:
 
         predictions = detector_with(handler).predict(Image(content=image_bytes))
 
-        assert seen["url"] == "http://tfs:8501/v1/models/rfcn:predict"
+        assert seen["url"] == "http://tfs:8501/v1/models/rfcn/versions/1:predict"
         assert [prediction.class_name for prediction in predictions] == ["cat", "person"]
 
     def test_downscales_the_image_before_serialising_it(self, image_bytes: bytes) -> None:
@@ -134,3 +158,37 @@ class TestTensorFlowServingDetector:
         info = detector_with(lambda _request: httpx.Response(200, json=TFS_BODY)).info
 
         assert (info.name, info.framework) == ("rfcn", "tensorflow-serving")
+
+    def test_uses_the_remote_name_without_changing_its_identity(self, image_bytes: bytes) -> None:
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(str(request.url))
+            return httpx.Response(200, json=TFS_BODY)
+
+        detector = detector_with(handler, remote_name="served-rfcn")
+        detector.predict(Image(content=image_bytes))
+
+        assert seen == ["http://tfs:8501/v1/models/served-rfcn/versions/1:predict"]
+        assert detector.info.name == "rfcn"
+
+    def test_health_check_requires_an_available_version(self) -> None:
+        detector = detector_with(
+            lambda _request: httpx.Response(
+                200,
+                json={"model_version_status": [{"version": "1", "state": "AVAILABLE"}]},
+            )
+        )
+
+        detector.health_check()
+
+    def test_health_check_rejects_a_model_that_is_not_available(self) -> None:
+        detector = detector_with(
+            lambda _request: httpx.Response(
+                200,
+                json={"model_version_status": [{"version": "1", "state": "LOADING"}]},
+            )
+        )
+
+        with pytest.raises(DetectorUnavailableError, match="not ready"):
+            detector.health_check()

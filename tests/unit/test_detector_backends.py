@@ -130,6 +130,23 @@ class TestTorchScriptObjectDetector:
 
         assert [p.class_name for p in detector.predict(Image(content=image_bytes))] == ["cat"]
 
+    def test_uses_the_torchvision_input_contract(self, image_bytes: bytes) -> None:
+        received: list[Any] = []
+
+        def module(value: Any) -> list[dict[str, Any]]:
+            received.append(value)
+            return [{"boxes": [], "scores": [], "labels": []}]
+
+        detector = TorchScriptObjectDetector(
+            labels=LABELS,
+            module=module,
+            input_contract="torchvision",
+        )
+        detector.predict(Image(content=image_bytes))
+
+        assert isinstance(received[0], list)
+        assert received[0][0].shape[0] == 3
+
     def test_inference_failure_becomes_detector_unavailable(self, image_bytes: bytes) -> None:
         def module(_: Any) -> Any:
             raise RuntimeError("shape mismatch")
@@ -137,6 +154,21 @@ class TestTorchScriptObjectDetector:
         detector = TorchScriptObjectDetector(labels=LABELS, module=module)
 
         with pytest.raises(DetectorUnavailableError, match="inference failed"):
+            detector.predict(Image(content=image_bytes))
+
+    def test_invalid_torchvision_output_becomes_detector_unavailable(
+        self, image_bytes: bytes
+    ) -> None:
+        def module(_: Any) -> list[dict[str, Any]]:
+            return [{"boxes": [[0, 0, 1, 1]], "scores": [2.0], "labels": [0]}]
+
+        detector = TorchScriptObjectDetector(
+            labels=LABELS,
+            module=module,
+            input_contract="torchvision",
+        )
+
+        with pytest.raises(DetectorUnavailableError, match="invalid detections"):
             detector.predict(Image(content=image_bytes))
 
     def test_reports_its_identity(self) -> None:

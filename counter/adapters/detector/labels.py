@@ -1,11 +1,4 @@
-"""Label maps.
-
-Loaded through `importlib.resources`, not a relative path. The upstream adapter
-opened `counter/adapters/mscoco_label_map.json`, which resolves against the
-current working directory: the app worked when started from the repo root and
-raised FileNotFoundError from anywhere else, including from a container whose
-WORKDIR differs and from a systemd unit.
-"""
+"""Label-map loading and lookup."""
 
 from __future__ import annotations
 
@@ -59,13 +52,6 @@ def _parse_text_label_map(raw: str) -> Mapping[int, str]:
 
 
 def class_name_for(labels: Mapping[int, str], class_id: float | int) -> str:
-    """Resolve a class id to a name, tolerating float ids and unknown ids.
-
-    TensorFlow Serving returns detection classes as floats (`18.0`), so the
-    upstream `self.classes_dict[detection_class]` lookup against an int-keyed
-    dict raised KeyError for every single detection once a real model was wired
-    in. Unknown ids fall back to a synthetic name rather than being dropped:
-    losing a detection silently would corrupt the counts, which are the product.
-    """
+    """Resolve numeric class IDs and retain unknown classes."""
     key = int(class_id)
     return labels.get(key, f"class_{key}")

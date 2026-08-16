@@ -1,10 +1,4 @@
-"""Shared fixtures.
-
-Integration tests run against PostgreSQL when TEST_DATABASE_URL points at one,
-and against a temporary SQLite file otherwise. That keeps `make test` runnable
-on a laptop with nothing installed while CI exercises the real target dialect —
-see docs/TESTING.md for what each level does and does not prove.
-"""
+"""Shared test fixtures."""
 
 from __future__ import annotations
 
@@ -107,11 +101,7 @@ def database_url(tmp_path: Path) -> str:
 
 @pytest.fixture
 def migrated_engine(database_url: str, monkeypatch: pytest.MonkeyPatch) -> Iterator[Engine]:
-    """A database whose schema was built by the real migrations.
-
-    Not `metadata.create_all()`: that would test a schema nobody deploys and
-    would let a broken migration reach production green.
-    """
+    """Create a database through Alembic migrations."""
     monkeypatch.setenv("COUNTER_DATABASE_URL", database_url)
     config = alembic_config()
 
