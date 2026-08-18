@@ -108,6 +108,8 @@ Artifacts can be pinned to a SHA-256, so you know what you are actually serving.
 
 ## Docs
 
+- [Implementation walkthrough](docs/IMPLEMENTATION.md): what was built, why, and
+  what replacing any piece would cost
 - [Code review](docs/CODE_REVIEW.md) of the original code: 19 findings, all fixed
 - [Architecture](docs/ARCHITECTURE.md), and the options that were rejected
 - [Internal models](docs/MULTI_MODEL.md) and [frameworks](docs/MULTI_FRAMEWORK.md)
